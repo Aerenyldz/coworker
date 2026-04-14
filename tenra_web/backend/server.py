@@ -8,6 +8,7 @@ import re
 import io
 import sys
 import os
+from pathlib import Path
 import requests
 import traceback
 import keyboard
@@ -18,7 +19,11 @@ from fastapi.responses import StreamingResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 
 # Acil Stop Kapatma (ESC tuşuna basıldığında sistemi olduğu gibi öldürür)
-keyboard.add_hotkey('esc', lambda: os._exit(0))
+try:
+    keyboard.add_hotkey('esc', lambda: os._exit(0))
+except Exception:
+    # Bazı ortamlarda global hotkey erişimi olmayabilir.
+    pass
 
 # Overlay (kırmızı çerçeve)
 try:
@@ -31,24 +36,29 @@ app = FastAPI(title="Tenra V4")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "http://127.0.0.1:8000",
+        "http://localhost:8000",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+FRONTEND_DIR = (Path(__file__).resolve().parent.parent / "frontend")
+
 # Frontend servis
 @app.get("/")
 def read_root():
-    return FileResponse("../frontend/index.html")
+    return FileResponse(FRONTEND_DIR / "index.html")
 
 @app.get("/styles.css")
 def get_css():
-    return FileResponse("../frontend/styles.css")
+    return FileResponse(FRONTEND_DIR / "styles.css")
 
 @app.get("/app.js")
 def get_js():
-    return FileResponse("../frontend/app.js")
+    return FileResponse(FRONTEND_DIR / "app.js")
 
 # ─── MODEL AYARLARI ───
 OLLAMA_URL = "http://localhost:11434/api/chat"
@@ -220,7 +230,10 @@ async def chat_endpoint(request: Request):
                     for chunk in r.iter_lines():
                         if not chunk:
                             continue
-                        chunk_data = json.loads(chunk.decode("utf-8"))
+                        try:
+                            chunk_data = json.loads(chunk.decode("utf-8"))
+                        except (json.JSONDecodeError, UnicodeDecodeError):
+                            continue
                         message = chunk_data.get("message", {})
                         
                         content = message.get("content", "")
