@@ -8,7 +8,9 @@ import re
 import io
 import sys
 import os
+import logging
 from pathlib import Path
+from urllib.parse import urlparse
 import requests
 import traceback
 import keyboard
@@ -33,13 +35,22 @@ except:
     def hide_red_border(): pass
 
 app = FastAPI(title="Tenra V4")
+logger = logging.getLogger(__name__)
 
 DEFAULT_ALLOWED_ORIGINS = [
     "http://127.0.0.1:8000",
     "http://localhost:8000",
 ]
 allowed_origins_env = os.getenv("TENRA_ALLOWED_ORIGINS", "")
-ALLOWED_ORIGINS = [o.strip() for o in allowed_origins_env.split(",") if o.strip()] or DEFAULT_ALLOWED_ORIGINS
+raw_allowed_origins = [o.strip() for o in allowed_origins_env.split(",") if o.strip()]
+
+def _is_valid_origin(origin: str) -> bool:
+    parsed = urlparse(origin)
+    if parsed.scheme not in {"http", "https"}:
+        return False
+    return bool(parsed.hostname)
+
+ALLOWED_ORIGINS = [o for o in raw_allowed_origins if _is_valid_origin(o)] or DEFAULT_ALLOWED_ORIGINS
 
 app.add_middleware(
     CORSMiddleware,
@@ -52,8 +63,13 @@ app.add_middleware(
 FRONTEND_DIR = (Path(__file__).resolve().parent.parent / "frontend")
 
 def _frontend_file(filename: str) -> Path:
-    candidate = (FRONTEND_DIR / filename).resolve()
-    if candidate.parent != FRONTEND_DIR.resolve() or not candidate.exists():
+    base = FRONTEND_DIR.resolve()
+    candidate = (base / filename).resolve()
+    try:
+        candidate.relative_to(base)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Frontend dosyası bulunamadı")
+    if not candidate.exists():
         raise HTTPException(status_code=404, detail="Frontend dosyası bulunamadı")
     return candidate
 
@@ -243,6 +259,7 @@ async def chat_endpoint(request: Request):
                         try:
                             chunk_data = json.loads(chunk.decode("utf-8"))
                         except (json.JSONDecodeError, UnicodeDecodeError):
+                            logger.debug("Invalid stream chunk from Ollama: %r", chunk[:200])
                             continue
                         message = chunk_data.get("message", {})
                         
