@@ -14,9 +14,9 @@ import traceback
 import keyboard
 from contextlib import redirect_stdout, redirect_stderr
 from fastapi import FastAPI, Request
+from fastapi import HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, FileResponse
-from fastapi.staticfiles import StaticFiles
 
 # Acil Stop Kapatma (ESC tuşuna basıldığında sistemi olduğu gibi öldürür)
 try:
@@ -34,12 +34,16 @@ except:
 
 app = FastAPI(title="Tenra V4")
 
+DEFAULT_ALLOWED_ORIGINS = [
+    "http://127.0.0.1:8000",
+    "http://localhost:8000",
+]
+allowed_origins_env = os.getenv("TENRA_ALLOWED_ORIGINS", "")
+ALLOWED_ORIGINS = [o.strip() for o in allowed_origins_env.split(",") if o.strip()] or DEFAULT_ALLOWED_ORIGINS
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://127.0.0.1:8000",
-        "http://localhost:8000",
-    ],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -47,18 +51,24 @@ app.add_middleware(
 
 FRONTEND_DIR = (Path(__file__).resolve().parent.parent / "frontend")
 
+def _frontend_file(filename: str) -> Path:
+    candidate = (FRONTEND_DIR / filename).resolve()
+    if candidate.parent != FRONTEND_DIR.resolve() or not candidate.exists():
+        raise HTTPException(status_code=404, detail="Frontend dosyası bulunamadı")
+    return candidate
+
 # Frontend servis
 @app.get("/")
 def read_root():
-    return FileResponse(FRONTEND_DIR / "index.html")
+    return FileResponse(_frontend_file("index.html"))
 
 @app.get("/styles.css")
 def get_css():
-    return FileResponse(FRONTEND_DIR / "styles.css")
+    return FileResponse(_frontend_file("styles.css"))
 
 @app.get("/app.js")
 def get_js():
-    return FileResponse(FRONTEND_DIR / "app.js")
+    return FileResponse(_frontend_file("app.js"))
 
 # ─── MODEL AYARLARI ───
 OLLAMA_URL = "http://localhost:11434/api/chat"
