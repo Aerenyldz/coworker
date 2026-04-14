@@ -1,0 +1,328 @@
+/* Tenra V4 — Premium Dark UI */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&display=swap');
+
+:root {
+  --bg-dark: #0a0a0a;
+  --bg-gradient: linear-gradient(135deg, #0f0f11 0%, #1a1a24 100%);
+  --accent: #5eebd8;
+  --accent-glow: rgba(94, 235, 216, 0.4);
+  --red-glow: rgba(255, 60, 60, 0.6);
+  --text-main: #f0f0f0;
+  --text-muted: #888894;
+  --glass-bg: rgba(255, 255, 255, 0.03);
+  --glass-border: rgba(255, 255, 255, 0.08);
+  --success: #4caf72;
+  --error: #cf6679;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: 'Inter', sans-serif;
+  background: var(--bg-dark);
+  background-image: var(--bg-gradient);
+  color: var(--text-main);
+  height: 100vh;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  overflow: hidden;
+}
+
+.app-container {
+  width: 100%;
+  max-width: 900px;
+  height: 90vh;
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
+  border-radius: 20px;
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  box-shadow: 0 30px 60px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255,255,255,0.1);
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  overflow: hidden;
+}
+
+/* Header */
+.header {
+  padding: 1.5rem 2rem;
+  border-bottom: 1px solid var(--glass-border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.logo-container {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.logo {
+  width: 40px;
+  height: 40px;
+  background: transparent;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  font-weight: 600;
+  font-size: 24px;
+  color: var(--accent);
+  text-shadow: 0 0 15px var(--accent-glow);
+  font-family: "Courier New", Courier, monospace;
+}
+
+.status {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  background-color: var(--accent);
+  border-radius: 50%;
+  box-shadow: 0 0 10px var(--accent);
+  animation: pulse 2s infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; box-shadow: 0 0 10px var(--accent); }
+  50% { opacity: 0.5; box-shadow: 0 0 4px var(--accent); }
+}
+
+/* Chat Area */
+.chat-window {
+  flex: 1;
+  padding: 2rem;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 1.2rem;
+  scroll-behavior: smooth;
+}
+
+.chat-window::-webkit-scrollbar {
+  width: 6px;
+}
+.chat-window::-webkit-scrollbar-thumb {
+  background: rgba(255,255,255,0.1);
+  border-radius: 10px;
+}
+
+.message {
+  max-width: 80%;
+  line-height: 1.6;
+  opacity: 0;
+  animation: fadeIn 0.4s forwards ease-out;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.message.user {
+  align-self: flex-end;
+  background: rgba(255,255,255,0.06);
+  padding: 1rem 1.2rem;
+  border-radius: 16px;
+  border-bottom-right-radius: 4px;
+}
+
+.message.tenra {
+  align-self: flex-start;
+  color: var(--text-main);
+}
+
+.message.tenra p {
+  margin-bottom: 0.5rem;
+}
+
+/* == KOD ÇALIŞTIRMA BLOKLARI (YENİ) == */
+.code-execution {
+  align-self: flex-start;
+  width: 90%;
+  border-radius: 12px;
+  overflow: hidden;
+  animation: fadeIn 0.3s forwards ease-out;
+  opacity: 0;
+  margin: 4px 0;
+}
+
+.code-header {
+  padding: 8px 14px;
+  font-size: 0.8rem;
+  font-weight: 500;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: rgba(94, 235, 216, 0.08);
+  color: var(--accent);
+  border-bottom: 1px solid rgba(94, 235, 216, 0.1);
+}
+
+.code-header.success-header {
+  background: rgba(76, 175, 114, 0.1);
+  color: var(--success);
+  border-bottom-color: rgba(76, 175, 114, 0.15);
+}
+
+.code-header.error-header {
+  background: rgba(207, 102, 121, 0.1);
+  color: var(--error);
+  border-bottom-color: rgba(207, 102, 121, 0.15);
+}
+
+.code-content {
+  background: rgba(0, 0, 0, 0.5);
+  padding: 12px 14px;
+  font-family: 'Courier New', monospace;
+  font-size: 0.78rem;
+  color: #a8d0c8;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 150px;
+  overflow-y: auto;
+  margin: 0;
+}
+
+.code-output {
+  background: rgba(0, 0, 0, 0.4);
+  padding: 10px 14px;
+  font-family: 'Courier New', monospace;
+  font-size: 0.78rem;
+  color: #c8d0cc;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 200px;
+  overflow-y: auto;
+  margin: 0;
+}
+
+.code-output.error-text {
+  color: #e88;
+}
+
+.code-spinner {
+  width: 12px;
+  height: 12px;
+  border: 2px solid rgba(94, 235, 216, 0.3);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+/* Running state — red glow border */
+.code-execution.running {
+  border: 1px solid rgba(255, 60, 60, 0.3);
+  box-shadow: 0 0 12px rgba(255, 60, 60, 0.15);
+  animation: fadeIn 0.3s forwards ease-out, redPulse 1.5s infinite;
+}
+
+@keyframes redPulse {
+  0%, 100% { box-shadow: 0 0 8px rgba(255, 60, 60, 0.15); }
+  50% { box-shadow: 0 0 20px rgba(255, 60, 60, 0.35); }
+}
+
+.code-execution.success {
+  border: 1px solid rgba(76, 175, 114, 0.2);
+}
+
+.code-execution.error {
+  border: 1px solid rgba(207, 102, 121, 0.2);
+}
+
+/* Input Area */
+.input-area {
+  padding: 1.5rem 2rem;
+  border-top: 1px solid var(--glass-border);
+  background: rgba(0,0,0,0.2);
+}
+
+.input-container {
+  display: flex;
+  background: rgba(255,255,255,0.03);
+  border: 1px solid var(--glass-border);
+  border-radius: 12px;
+  padding: 0.5rem;
+  transition: border-color 0.3s;
+}
+
+.input-container:focus-within {
+  border-color: rgba(255,255,255,0.15);
+}
+
+input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  color: #fff;
+  padding: 0.8rem 1rem;
+  font-size: 1rem;
+  font-family: 'Inter', sans-serif;
+  outline: none;
+}
+
+input::placeholder {
+  color: var(--text-muted);
+}
+
+button {
+  background: var(--accent);
+  color: #000;
+  border: none;
+  border-radius: 8px;
+  padding: 0 1.5rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+button:hover {
+  background: #73f2e1;
+  box-shadow: 0 0 15px var(--accent-glow);
+  transform: translateY(-1px);
+}
+
+button:disabled {
+  background: var(--text-muted);
+  cursor: not-allowed;
+  transform: none;
+  box-shadow: none;
+}
+
+/* Markdown in chat */
+.message.tenra code {
+  background: rgba(255,255,255,0.1);
+  padding: 2px 6px;
+  font-family: monospace;
+  border-radius: 4px;
+}
+.message.tenra pre {
+  background: rgba(0,0,0,0.4);
+  padding: 12px;
+  border-radius: 8px;
+  overflow-x: auto;
+  margin: 10px 0;
+}
+.message.tenra ul, .message.tenra ol {
+  margin-left: 20px;
+  margin-bottom: 10px;
+}
