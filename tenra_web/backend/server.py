@@ -8,17 +8,24 @@ import re
 import io
 import sys
 import os
+import logging
+from pathlib import Path
+from urllib.parse import urlparse
 import requests
 import traceback
 import keyboard
 from contextlib import redirect_stdout, redirect_stderr
 from fastapi import FastAPI, Request
+from fastapi import HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, FileResponse
-from fastapi.staticfiles import StaticFiles
 
 # Acil Stop Kapatma (ESC tuşuna basıldığında sistemi olduğu gibi öldürür)
-keyboard.add_hotkey('esc', lambda: os._exit(0))
+try:
+    keyboard.add_hotkey('esc', lambda: os._exit(0))
+except Exception:
+    # Bazı ortamlarda global hotkey erişimi olmayabilir.
+    pass
 
 # Overlay (kırmızı çerçeve)
 try:
@@ -28,27 +35,56 @@ except:
     def hide_red_border(): pass
 
 app = FastAPI(title="Tenra V4")
+logger = logging.getLogger(__name__)
+
+DEFAULT_ALLOWED_ORIGINS = [
+    "http://127.0.0.1:8000",
+    "http://localhost:8000",
+]
+allowed_origins_env = os.getenv("TENRA_ALLOWED_ORIGINS", "")
+raw_allowed_origins = [o.strip() for o in allowed_origins_env.split(",") if o.strip()]
+
+def _is_valid_origin(origin: str) -> bool:
+    parsed = urlparse(origin)
+    if parsed.scheme not in {"http", "https"}:
+        return False
+    return bool(parsed.hostname)
+
+ALLOWED_ORIGINS = [o for o in raw_allowed_origins if _is_valid_origin(o)] or DEFAULT_ALLOWED_ORIGINS
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+FRONTEND_DIR = (Path(__file__).resolve().parent.parent / "frontend")
+
+def _frontend_file(filename: str) -> Path:
+    base = FRONTEND_DIR.resolve()
+    candidate = (base / filename).resolve()
+    try:
+        candidate.relative_to(base)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Frontend dosyası bulunamadı")
+    if not candidate.exists():
+        raise HTTPException(status_code=404, detail="Frontend dosyası bulunamadı")
+    return candidate
+
 # Frontend servis
 @app.get("/")
 def read_root():
-    return FileResponse("../frontend/index.html")
+    return FileResponse(_frontend_file("index.html"))
 
 @app.get("/styles.css")
 def get_css():
-    return FileResponse("../frontend/styles.css")
+    return FileResponse(_frontend_file("styles.css"))
 
 @app.get("/app.js")
 def get_js():
-    return FileResponse("../frontend/app.js")
+    return FileResponse(_frontend_file("app.js"))
 
 # ─── MODEL AYARLARI ───
 OLLAMA_URL = "http://localhost:11434/api/chat"
@@ -220,7 +256,11 @@ async def chat_endpoint(request: Request):
                     for chunk in r.iter_lines():
                         if not chunk:
                             continue
-                        chunk_data = json.loads(chunk.decode("utf-8"))
+                        try:
+                            chunk_data = json.loads(chunk.decode("utf-8"))
+                        except (json.JSONDecodeError, UnicodeDecodeError):
+                            logger.debug("Invalid stream chunk from Ollama: %r", chunk[:200])
+                            continue
                         message = chunk_data.get("message", {})
                         
                         content = message.get("content", "")
