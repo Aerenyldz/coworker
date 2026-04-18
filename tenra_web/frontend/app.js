@@ -2,8 +2,14 @@ const chat = document.getElementById('chat');
 const form = document.getElementById('chat-form');
 const promptInput = document.getElementById('prompt');
 const sendBtn = document.getElementById('send-btn');
+const permissionControl = document.getElementById('permission-control');
+const permissionScreen = document.getElementById('permission-screen');
+const screenPreview = document.getElementById('screen-preview');
+const screenStatus = document.getElementById('screen-status');
 
 let messageHistory = [];
+let latestScreenFrame = null;
+let screenPollTimer = null;
 
 function addMessageToUI(content, sender = 'tenra', isHTML = false) {
     const msgDiv = document.createElement('div');
@@ -62,6 +68,44 @@ function escapeHtml(text) {
     return div.innerHTML;
 }
 
+async function pollScreenFrame() {
+    if (!permissionScreen.checked) {
+        return;
+    }
+
+    try {
+        const response = await fetch('/screen');
+        const data = await response.json();
+        if (data.ok && data.frame) {
+            latestScreenFrame = data.frame;
+            screenPreview.src = `data:image/jpeg;base64,${latestScreenFrame}`;
+            screenStatus.textContent = 'Canlı';
+        } else {
+            screenStatus.textContent = 'Erişim yok';
+        }
+    } catch (error) {
+        screenStatus.textContent = 'Bağlantı hatası';
+    }
+}
+
+function startScreenPolling() {
+    if (screenPollTimer) clearInterval(screenPollTimer);
+
+    if (!permissionScreen.checked) {
+        latestScreenFrame = null;
+        screenPreview.removeAttribute('src');
+        screenStatus.textContent = 'Kapalı';
+        return;
+    }
+
+    screenStatus.textContent = 'Bağlanıyor...';
+    pollScreenFrame();
+    screenPollTimer = setInterval(pollScreenFrame, 2500);
+}
+
+permissionScreen.addEventListener('change', startScreenPolling);
+startScreenPolling();
+
 form.addEventListener('submit', async (e) => {
     e.preventDefault();
     const text = promptInput.value.trim();
@@ -82,7 +126,14 @@ form.addEventListener('submit', async (e) => {
         const response = await fetch('/chat', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ messages: messageHistory })
+            body: JSON.stringify({
+                messages: messageHistory,
+                permissions: {
+                    control: permissionControl.checked,
+                    screen: permissionScreen.checked
+                },
+                screenFrame: permissionScreen.checked ? latestScreenFrame : null
+            })
         });
 
         const reader = response.body.getReader();
@@ -109,6 +160,12 @@ form.addEventListener('submit', async (e) => {
                     else if (data.type === 'code_exec') {
                         if (data.status === 'running') {
                             currentRunningBlock = addCodeBlock('running', data.code, null);
+                        } else if (data.status === 'blocked') {
+                            if (currentRunningBlock) {
+                                currentRunningBlock.remove();
+                                currentRunningBlock = null;
+                            }
+                            addCodeBlock('error', null, data.output || 'Kontrol izni olmadığı için engellendi.');
                         } else {
                             // Eski 'running' bloğunu kaldır
                             if (currentRunningBlock) {
