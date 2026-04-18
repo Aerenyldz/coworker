@@ -54,8 +54,15 @@ body {
   padding: 1.5rem 2rem;
   border-bottom: 1px solid var(--glass-border);
   display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.header-top {
+  display: flex;
   align-items: center;
   justify-content: space-between;
+  width: 100%;
 }
 
 .logo-container {
@@ -93,6 +100,51 @@ body {
   border-radius: 50%;
   box-shadow: 0 0 10px var(--accent);
   animation: pulse 2s infinite;
+}
+
+.control-panel {
+  width: 100%;
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.toggle-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.85rem;
+  color: var(--text-main);
+}
+
+.toggle-item input {
+  width: 16px;
+  height: 16px;
+}
+
+.screen-panel {
+  width: 100%;
+  border: 1px solid var(--glass-border);
+  border-radius: 10px;
+  background: rgba(255,255,255,0.02);
+  padding: 10px;
+}
+
+.screen-panel-head {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 8px;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+#screen-preview {
+  width: 100%;
+  max-height: 140px;
+  object-fit: cover;
+  border-radius: 8px;
+  background: rgba(0,0,0,0.4);
+  border: 1px solid var(--glass-border);
 }
 
 @keyframes pulse {

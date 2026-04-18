@@ -9,16 +9,23 @@ import io
 import sys
 import os
 import logging
+import base64
 from pathlib import Path
 from urllib.parse import urlparse
 import requests
 import traceback
 import keyboard
+from datetime import datetime
 from contextlib import redirect_stdout, redirect_stderr
 from fastapi import FastAPI, Request
 from fastapi import HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, FileResponse
+
+try:
+    import pyautogui
+except Exception:
+    pyautogui = None
 
 # Acil Stop Kapatma (ESC tuşuna basıldığında sistemi olduğu gibi öldürür)
 try:
@@ -90,99 +97,25 @@ def get_js():
 OLLAMA_URL = "http://localhost:11434/api/chat"
 MODEL = "tenra:latest"
 
-SYSTEM_PROMPT = r"""Sen Tenra'sın — kullanıcının bilgisayarında çalışan güçlü bir AI asistanısın.
-Kullanıcının Windows bilgisayarında SINIRSIZ yetkiye sahipsin.
+def build_system_prompt(control_enabled: bool, screen_enabled: bool) -> str:
+    control_state = "AÇIK" if control_enabled else "KAPALI"
+    screen_state = "AÇIK" if screen_enabled else "KAPALI"
+    return f"""Sen Tenra'sın: canlı, dost canlısı ama akıllı bir AI yardımcı-pet.
+Kullanıcıyla sıcak ve kısa iletişim kurarsın, net ve güvenli olursun.
+Türkçe konuşursun.
 
-## ÇOK ÖNEMLİ KURALLAR:
+## Oturum durumu
+- Canlı ekran erişimi: {screen_state}
+- Bilgisayar kontrol izni: {control_state}
 
-### KOD YAZARAK ÇALIŞ:
-Bir görev verildiğinde, planını KISA anlat, ardından ```python bloğu içinde çalıştırılabilir Python kodu yaz.
-Bu kod backend tarafından otomatik çalıştırılacak ve çıktısı sana geri gelecek.
-
-### KULLANILABILIR KÜTÜPHANELER:
-- os, subprocess, glob, shutil, pathlib — dosya/sistem işlemleri
-- pyautogui — mouse hareket ettirme, tıklama, yazı yazma
-- keyboard — tuşlara basma
-- requests — HTTP istekleri
-- Tüm standart Python kütüphaneleri
-
-### MOUSE VE KLAVYE KONTROLÜ:
-```python
-import pyautogui
-pyautogui.FAILSAFE = True
-
-# Fareyi hareket ettir
-pyautogui.moveTo(500, 300, duration=0.5)
-
-# Tıkla
-pyautogui.click()
-
-# Sağ tıkla
-pyautogui.click(button='right')
-
-# Yazı yaz
-pyautogui.write('merhaba', interval=0.05)
-
-# Tuş kombinasyonu
-pyautogui.hotkey('ctrl', 'a')
-
-# Ekran görüntüsü al
-screenshot = pyautogui.screenshot()
-screenshot.save('ekran.png')
-```
-
-### BİR UYGULAMAYI VEYA BİLGİSAYAR İÇİ BİR ŞEYİ AÇMA (ÇOK ÖNEMLİ):
-Uygulamaları (örn. hesap makinesi, duckduckgo, spotify) açmak için asla "shell:appsfolder" gibi garip şeyler yazma veya mouse/koordinat sallama! Bunun yerine İNSAN GİBİ başlat menüsünü kullan:
-```python
-import pyautogui, time
-pyautogui.press('win')
-time.sleep(0.5)
-pyautogui.write('duckduckgo', interval=0.05) # Açılacak uygulamanın adı
-time.sleep(0.5)
-pyautogui.press('enter')
-```
-
-### WEB SİTESİ AÇMA:
-Eğer bir web adresine (örn. google, youtube) gidilecekse mouse DEĞİL, DAİMA `webbrowser` kullan:
-```python
-import webbrowser
-webbrowser.open("https://google.com")
-```
-
-### BİLGİSAYARDAKİ DOSYALARI (MASAÜSTÜ) YÖNETME (ÇÖP KUTUSU / AÇMA):
-Masaüstü klasörünün yolu: `r"C:\Users\ahmet\OneDrive\Desktop"`
-1. "Masaüstündeki bir dosyayı aç / başlat" denirse WİNDOWS ARAMA KULLANMA! Farenizi kullanma! Direkt:
-```python
-import os
-# Sadece tam dosya yolunu vererek başlat (EXE, PDF, TXT vb.)
-os.startfile(r"C:\Users\ahmet\OneDrive\Desktop\dosyadi.txt")
-```
-2. "Şunu çöpe at / geri dönüşüme taşı / sil" denirse DAİMA `send2trash` kütüphanesini kullan:
-```python
-from send2trash import send2trash
-send2trash(r"C:\Users\ahmet\OneDrive\Desktop\silinecek_dosya.txt")
-```
-3. "Masaüstünde yeni dosya/not oluştur" denirse:
-```python
-with open(r"C:\Users\ahmet\OneDrive\Desktop\yeni.txt", "w", encoding="utf-8") as f:
-    f.write("merhaba")
-```
-
-### TARAYICI VE WEB İŞLEMLERİ (ÇOK ÖNEMLİ):
-"Google'ı aç", "Youtube aç" gibi isteklerde ASLA mouse koordinatlarını kafadan hesaplayarak tıklamaya çalışma! (Mouse'un kontrolden çıkarıp sapıtmasına sebep olur). DAİMA `webbrowser` modülünü kullan:
-```python
-import webbrowser
-webbrowser.open("https://google.com")
-webbrowser.open("https://youtube.com")
-```
-
-### KURALLAR:
-1. SADECE İSTENENİ YAP (FAZLASINI DEĞİL): Sana sadece bir klasör/dosya 'oluşturman' veya 'taşıman' söylendiyse, SADECE `os` kodu ile dosya işlemini yap ve dur. İşlem bittikten sonra kendi inisiyatifinle klavye (pyautogui) kullanıp o klasörü aratmaya veya açmaya ASLA ÇALIŞMA!
-2. BAŞLAT MENÜSÜ KISITLAMASI: Dosya veya klasör isimleri Windows Başlat (win) aramasından ARATILMAZ. Başlat araması sadece UYGULAMA (Hesap makinesi, Spotify, Chrome) başlatmak içindir.
-3. İZİN BEKLEME SEN YAP: "Yapmamı ister misiniz?" asla deme. Dümdüz kodu yaz ve çalıştır. İşlem başarısız olursa bir başka yöntemle tekrar dene.
-4. HER ZAMAN ```python BLOĞU KULLAN: Açıklama yaz, sonra kod bloğu ekle. Kod bloğu olmayan mesajların kodları çalıştırılmaz.
-5. KISA KONUŞ: İşlemi kod ile yap ve kısa bir bilgi ver, boş uzatma.
-6. Türkçe konuşursun.
+## Davranış kuralları
+1. Kullanıcı ne isterse önce kısa ve anlaşılır bir plan söyle.
+2. Sadece görev için gerekli işlemi yap, ekstra adım yapma.
+3. Eğer "bilgisayar kontrol izni" KAPALI ise asla Python kodu üretme/çalıştırma; sadece kullanıcıyı yönlendir.
+4. Eğer kontrol izni AÇIK ise çalıştırılabilir ```python``` kod bloğu verebilirsin.
+5. Eğer canlı ekran erişimi AÇIK ise ekrana dair bağlamı dikkate al.
+6. Belirsiz, riskli veya yıkıcı isteklerde kullanıcıyı uyar ve güvenli alternatif öner.
+7. Yanıtlarını kısa, yardımsever ve odaklı tut.
 """
 
 # ─── KOD ÇALIŞTIRICI ───
@@ -227,14 +160,60 @@ def extract_python_blocks(text: str) -> list:
     return matches
 
 
+def capture_screen_base64(max_width: int = 960, jpeg_quality: int = 65) -> str:
+    if pyautogui is None:
+        raise RuntimeError("Ekran yakalama modülü mevcut değil")
+
+    screenshot = pyautogui.screenshot()
+    width, height = screenshot.size
+    if width > max_width:
+        ratio = max_width / float(width)
+        screenshot = screenshot.resize((max_width, int(height * ratio)))
+
+    buffer = io.BytesIO()
+    screenshot.convert("RGB").save(buffer, format="JPEG", quality=jpeg_quality, optimize=True)
+    return base64.b64encode(buffer.getvalue()).decode("utf-8")
+
+
 # ─── CHAT ENDPOINT ───
+
+@app.get("/screen")
+def get_screen_frame():
+    try:
+        frame = capture_screen_base64()
+        return {
+            "ok": True,
+            "capturedAt": datetime.utcnow().isoformat() + "Z",
+            "image": f"data:image/jpeg;base64,{frame}",
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error": str(exc),
+        }
 
 @app.post("/chat")
 async def chat_endpoint(request: Request):
     data = await request.json()
+    permissions = data.get("permissions", {}) or {}
+    control_enabled = bool(permissions.get("control", False))
+    screen_enabled = bool(permissions.get("screen", False))
+    screen_frame = data.get("screenFrame")
     user_messages = data.get("messages", [])
-    
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}] + user_messages
+
+    if (
+        screen_enabled
+        and isinstance(screen_frame, str)
+        and screen_frame
+        and user_messages
+        and isinstance(user_messages[-1], dict)
+        and user_messages[-1].get("role") == "user"
+    ):
+        last = dict(user_messages[-1])
+        last["images"] = [screen_frame]
+        user_messages = user_messages[:-1] + [last]
+
+    messages = [{"role": "system", "content": build_system_prompt(control_enabled, screen_enabled)}] + user_messages
 
     def generate_response():
         MAX_TURNS = 5  # Maksimim kod çalıştırma turu (sonsuz döngüyü engeller) 
@@ -282,6 +261,19 @@ async def chat_endpoint(request: Request):
             
             if not code_blocks:
                 # Kod yoksa cevap tamamdır, döngüden çık
+                break
+
+            if not control_enabled:
+                blocked_text = "Kontrol izni kapalı olduğu için kod çalıştırma engellendi."
+                yield json.dumps({
+                    "type": "code_exec",
+                    "status": "blocked",
+                    "output": blocked_text
+                }) + "\n"
+                messages.append({
+                    "role": "user",
+                    "content": "[SİSTEM] Kod çalıştırma engellendi çünkü kontrol izni kapalı."
+                })
                 break
             
             # Kod blokları var — çalıştır!

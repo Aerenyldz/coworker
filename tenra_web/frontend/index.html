@@ -3,27 +3,48 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Tenra V4 — AI Asistan</title>
+    <title>Tenra Live — AI Pet Agent</title>
     <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
     <div class="app-container">
         <header class="header">
-            <div class="logo-container">
-                <div class="logo">T</div>
-                <h2>TENRA <span style="font-size:0.6em; color:#888; font-weight:300;">v4</span></h2>
+            <div class="header-top">
+                <div class="logo-container">
+                    <div class="logo">T</div>
+                    <h2>TENRA <span style="font-size:0.6em; color:#888; font-weight:300;">live</span></h2>
+                </div>
+                <div class="status">
+                    <div class="status-dot"></div>
+                    Mission Mode
+                </div>
             </div>
-            <div class="status">
-                <div class="status-dot"></div>
-                Interpreter Aktif
+
+            <div class="control-panel">
+                <label class="toggle-item">
+                    <input type="checkbox" id="permission-screen" checked>
+                    <span>Canlı ekran paylaşımı</span>
+                </label>
+                <label class="toggle-item">
+                    <input type="checkbox" id="permission-control">
+                    <span>Bilgisayar kontrol izni</span>
+                </label>
+            </div>
+
+            <div class="screen-panel">
+                <div class="screen-panel-head">
+                    <strong>Canlı ekran önizleme</strong>
+                    <span id="screen-status">Bekleniyor...</span>
+                </div>
+                <img id="screen-preview" alt="Canlı ekran önizlemesi">
             </div>
         </header>
         
         <main class="chat-window" id="chat">
             <div class="message tenra">
-                <p>Merhaba. Ben <strong>Tenra V4</strong>.</p>
-                <p>Artık bilgisayarınızda doğrudan <strong>kod çalıştırabiliyorum</strong>. Dosya silmek, klasör oluşturmak, uygulama açmak, mouse ile kontrol etmek — hepsi yapılabilir.</p>
-                <p>Bir görev verin, ben hallederim.</p>
+                <p>Merhaba. Ben <strong>Tenra Live</strong> 👋</p>
+                <p>Ben senin akıllı AI pet yardımcınım: konuşuruz, canlı ekranı görürüm ve sadece <strong>izin verdiğinde</strong> bilgisayarda işlem yaparım.</p>
+                <p>Birlikte çözmek istediğin şeyi yaz.</p>
             </div>
         </main>
         
