@@ -15,7 +15,7 @@ from urllib.parse import urlparse
 import requests
 import traceback
 import keyboard
-from datetime import datetime
+from datetime import datetime, timezone
 from contextlib import redirect_stdout, redirect_stderr
 from fastapi import FastAPI, Request
 from fastapi import HTTPException
@@ -183,19 +183,20 @@ def get_screen_frame():
         frame = capture_screen_base64()
         return {
             "ok": True,
-            "capturedAt": datetime.utcnow().isoformat() + "Z",
-            "image": f"data:image/jpeg;base64,{frame}",
+            "capturedAt": datetime.now(timezone.utc).isoformat(),
+            "frame": frame,
         }
     except Exception as exc:
+        logger.exception("Screen capture failed: %s", exc)
         return {
             "ok": False,
-            "error": str(exc),
+            "error": "Ekran yakalama şu anda kullanılamıyor.",
         }
 
 @app.post("/chat")
 async def chat_endpoint(request: Request):
     data = await request.json()
-    permissions = data.get("permissions", {}) or {}
+    permissions = data.get("permissions", {})
     control_enabled = bool(permissions.get("control", False))
     screen_enabled = bool(permissions.get("screen", False))
     screen_frame = data.get("screenFrame")

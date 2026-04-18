@@ -76,9 +76,9 @@ async function pollScreenFrame() {
     try {
         const response = await fetch('/screen');
         const data = await response.json();
-        if (data.ok && data.image) {
-            screenPreview.src = data.image;
-            latestScreenFrame = data.image.replace(/^data:image\/jpeg;base64,/, '');
+        if (data.ok && data.frame) {
+            latestScreenFrame = data.frame;
+            screenPreview.src = `data:image/jpeg;base64,${latestScreenFrame}`;
             screenStatus.textContent = 'Canlı';
         } else {
             screenStatus.textContent = 'Erişim yok';
