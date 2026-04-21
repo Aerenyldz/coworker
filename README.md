@@ -29,7 +29,7 @@ Ollama'yı başlatıp gerekli modeli yükleyin:
 ```bash
 ollama serve
 # Başka bir terminal'de:
-ollama pull qwen2.5:7b
+ollama pull hermes3:8b
 ```
 
 ---
@@ -84,9 +84,9 @@ Bağımlılıkları, Ollama bağlantısını ve model dosyalarını kontrol eder
 ## Ayarlar (`config.py`)
 
 ```python
-RESPONDER_MODEL = "qwen2.5:7b"  # Kullanılacak Ollama modeli
+RESPONDER_MODEL = "hermes3:8b"  # Kullanılacak Ollama modeli
 OLLAMA_URL = "http://localhost:11434/api"  # Ollama sunucu adresi
-LOCAL_ROUTER_PATH = "./tenra_v5/merged_model"  # Router model yolu
+USE_LOCAL_ROUTER = False  # Local FunctionGemma router (opsiyonel)
 ```
 
 ---
@@ -101,7 +101,7 @@ ollama serve
 
 ### "Modeller yüklenmedi"
 ```bash
-ollama pull qwen2.5:7b
+ollama pull hermes3:8b
 ```
 
 ### "PySide6 hatası"

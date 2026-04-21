@@ -52,6 +52,13 @@ def main() -> int:
             models = [m["name"] for m in data.get("models", [])]
             print("  [OK] Ollama is running")
             print(f"       Installed models: {', '.join(models) if models else 'none'}")
+            
+            # Check for vision model
+            if not any("llava" in m for m in models):
+                print("  [WARN] 'llava' (vision model) is NOT installed!")
+                print("         Run 'ollama pull llava' to enable screenshot analysis.")
+            else:
+                print("  [OK] Vision model (llava) is installed.")
         else:
             print(f"  [ERR] Ollama returned status {response.status_code}")
             all_ok = False

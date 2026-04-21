@@ -8,7 +8,7 @@ import threading
 
 from config import (
     RESPONDER_MODEL, OLLAMA_URL, LOCAL_ROUTER_PATH,
-    GRAY, RESET
+    GRAY, RESET, USE_LOCAL_ROUTER
 )
 
 http_session = requests.Session()
@@ -20,12 +20,15 @@ def is_router_loaded():
 
 
 def should_bypass_router(text):
-    return False
+    return not USE_LOCAL_ROUTER
 
 
 def route_query(user_input):
     """Router ile kullanıcı isteğini yönlendir."""
     global router
+
+    if not USE_LOCAL_ROUTER:
+        return "nonthinking", {"prompt": user_input}
 
     if not router:
         try:
@@ -37,6 +40,7 @@ def route_query(user_input):
 
     try:
         (func_name, params), elapsed = router.route_with_timing(user_input)
+        print(f"{GRAY}[Router] {func_name} ({elapsed*1000:.0f}ms){RESET}")
         return func_name, params
     except Exception as e:
         print(f"{GRAY}[Router Hatası: {e}]{RESET}")
@@ -60,6 +64,9 @@ def preload_models():
 
     def load_router():
         global router
+        if not USE_LOCAL_ROUTER:
+            print(f"{GRAY}[Router] Local router devre dışı (USE_LOCAL_ROUTER=False){RESET}")
+            return
         try:
             from core.router import FunctionGemmaRouter
             router = FunctionGemmaRouter(model_path=LOCAL_ROUTER_PATH, compile_model=False)

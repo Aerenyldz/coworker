@@ -11,3 +11,4 @@ send2trash>=1.8.0
 duckduckgo-search>=4.0
 piper-tts>=1.0.0
 python-dotenv>=1.0.0
+beautifulsoup4>=4.12.0
