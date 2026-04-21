@@ -8,6 +8,10 @@ import os
 import warnings
 warnings.simplefilter("ignore")
 
+# PyTorch warnings bastır
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+os.environ["TRANSFORMERS_VERBOSITY"] = "error"
+
 from PySide6.QtCore import Qt, QPoint, QSize, QTimer, Signal, QThread, QPropertyAnimation, QEasingCurve
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -188,22 +192,35 @@ class LLMWorker(QThread):
     
     def run(self):
         try:
-            from core.llm import route_query
             from core.function_executor import executor
             import requests
-            from config import RESPONDER_MODEL, OLLAMA_URL
+            from config import RESPONDER_MODEL, OLLAMA_URL, SKIP_ROUTER_ON_ERROR
+            import re
             
-            # 1. Router — kullanıcının ne istediğini anla
-            func_name, params = route_query(self.user_input)
+            # 1. Router — kullanıcının ne istediğini anla (hata toleransı)
+            func_name = "nonthinking"
+            params = {}
+            try:
+                from core.llm import route_query
+                func_name, params = route_query(self.user_input)
+            except Exception as router_err:
+                print(f"[Router Hatası] {router_err}. Direkt Ollama kullanılıyor.")
+                if SKIP_ROUTER_ON_ERROR:
+                    func_name = "nonthinking"
+                    params = {"prompt": self.user_input}
             
             # 2. Eğer fonksiyon çağrısı varsa çalıştır
             func_result = None
             if func_name not in ("thinking", "nonthinking"):
-                func_result = executor.execute(func_name, params)
-                self.tool_executed.emit(
-                    func_name, 
-                    func_result.get("message", "")
-                )
+                try:
+                    func_result = executor.execute(func_name, params)
+                    if func_result and func_result.get("success"):
+                        self.tool_executed.emit(
+                            func_name, 
+                            func_result.get("message", "✓")
+                        )
+                except Exception as exec_err:
+                    print(f"[Fonksiyon Hatası] {func_name}: {exec_err}")
             
             # 3. Responder LLM'e gönder
             system_msg = "Sen Tenra'sın — kullanıcının bilgisayarında çalışan Türkçe yapay zeka asistanısın. Kısa ve net cevap ver."
@@ -211,37 +228,42 @@ class LLMWorker(QThread):
             messages = [{"role": "system", "content": system_msg}]
             
             if func_result and func_result.get("success"):
-                context = f"Kullanıcı istedi: {self.user_input}\nÇalıştırılan fonksiyon: {func_name}\nSonuç: {func_result.get('message', '')}"
+                context = f"Kullanıcı istedi: {self.user_input}\nÇalıştırılan işlem: {func_name}\nSonuç: {func_result.get('message', '')}"
                 if func_result.get("data"):
-                    context += f"\nVeri: {str(func_result['data'])[:500]}"
+                    context += f"\nVeri: {str(func_result['data'])[:300]}"
                 messages.append({"role": "user", "content": context})
             else:
                 messages.append({"role": "user", "content": self.user_input})
             
             # Ollama'ya sor
-            response = requests.post(
-                f"{OLLAMA_URL}/chat",
-                json={
-                    "model": RESPONDER_MODEL,
-                    "messages": messages,
-                    "stream": False,
-                    "options": {"temperature": 0.7}
-                },
-                timeout=60
-            )
-            
-            if response.status_code == 200:
-                data = response.json()
-                reply = data.get("message", {}).get("content", "Cevap alınamadı.")
-                # Qwen3 thinking tags temizle
-                import re
-                reply = re.sub(r'<think>.*?</think>', '', reply, flags=re.DOTALL).strip()
-                self.response_ready.emit(reply, func_name if func_name not in ("thinking", "nonthinking") else "")
-            else:
-                self.response_ready.emit("⚠️ Ollama'dan cevap alınamadı.", "")
+            try:
+                response = requests.post(
+                    f"{OLLAMA_URL}/chat",
+                    json={
+                        "model": RESPONDER_MODEL,
+                        "messages": messages,
+                        "stream": False,
+                        "options": {"temperature": 0.7}
+                    },
+                    timeout=60
+                )
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    reply = data.get("message", {}).get("content", "Cevap alınamadı.")
+                    # Qwen thinking tags temizle
+                    reply = re.sub(r'<think>.*?</think>', '', reply, flags=re.DOTALL).strip()
+                    self.response_ready.emit(reply, func_name if func_name not in ("thinking", "nonthinking") else "")
+                else:
+                    self.response_ready.emit(f"⚠️ Ollama hata: {response.status_code}", "")
+            except requests.exceptions.ConnectionError:
+                self.response_ready.emit("⚠️ Ollama sunucusu çalışmıyor. Lütfen 'ollama serve' komutunu çalıştırın.", "")
+            except requests.exceptions.Timeout:
+                self.response_ready.emit("⚠️ Ollama yanıt vermiyor (zaman aşımı).", "")
                 
         except Exception as e:
-            self.response_ready.emit(f"⚠️ Hata: {str(e)}", "")
+            print(f"[LLMWorker Hata] {e}")
+            self.response_ready.emit(f"⚠️ Hata: {str(e)[:100]}", "")
 
 
 # ═══════════════════════════════════════════════

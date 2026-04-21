@@ -1,38 +1,146 @@
-# Project Overview
-This project is a FastAPI application that includes a backend and a static frontend.
+# Tenra V5 — Masaüstü AI Asistanı
 
-# Requirements
-- Python 3.11
-- FastAPI
-- Additional dependencies as specified in the requirements files.
+Ekranın köşesinde yüzen, her zaman erişilebilen kişisel AI asistanı.
 
-# Setup (venv)
-1. Create a virtual environment: `python -m venv .venv`
-2. Activate the virtual environment:
-   - On Windows: `.venv\Scripts\activate`
-   - On macOS/Linux: `source .venv/bin/activate`
+## Özellikler
+- 🎯 **Yüzen Widget** — Ekranda sabit duran, sürüklenebilir logo
+- 💬 **Doğal Dil** — Türkçe sohbet ve anlama
+- ⚡ **Sistem Kontrolü** — Dosya yönetimi, komut çalıştırma, uygulama açma
+- 🧠 **Akıllı Router** — Kullanıcı isteklerini otomatik işlevlere yönlendirme
+- 🔗 **Ollama Entegrasyonu** — Yerel LLM modelleri ile çalışma
 
-# Install
-Install dependencies using pip:
+---
+
+## Kurulum
+
+### 1. Gereksinimler
+- Python 3.11+
+- [Ollama](https://ollama.ai) kurulu ve `ollama serve` komutunun çalışır halde olması
+
+### 2. Sanal Ortam (ilk kez)
 ```bash
-pip install -r tenra_web/backend/requirements.txt
+python -m venv .venv
+.venv\Scripts\activate
+pip install -r tenra_v5\requirements.txt
 ```
 
-# Run (uvicorn)
-To run the FastAPI backend, use:
+### 3. Ollama Modeli
+Ollama'yı başlatıp gerekli modeli yükleyin:
 ```bash
-uvicorn tenra_web.backend.server:app --reload
+ollama serve
+# Başka bir terminal'de:
+ollama pull qwen2.5:7b
 ```
 
-# Environment Variables
-- `TENRA_ALLOWED_ORIGINS`: Set this environment variable to allow specific origins for CORS.
+---
 
-# Development (lint/test)
-Use ruff for linting and pytest for running tests:
+## Çalıştırma
+
+### Kolay Başlatma (Önerilir)
 ```bash
-ruff check .
-pytest
+run_tenra_v5.bat
 ```
 
-# Security Note
-Avoid using `exec()` within your code where possible, as it can execute arbitrary code and pose security risks.
+Bu dosya otomatik olarak:
+- Sanal ortamı oluşturur/etkinleştirir
+- Bağımlılıkları kurar
+- Sistemi kontrol eder
+- Tenra V5'i çalıştırır
+
+### Manuel Başlatma
+```bash
+.venv\Scripts\activate
+python tenra_v5\main.py
+```
+
+---
+
+## Kontrol Aracı
+
+Kurulum sorunları için:
+```bash
+python check_setup.py
+```
+
+Bağımlılıkları, Ollama bağlantısını ve model dosyalarını kontrol eder.
+
+---
+
+## Kullanım
+
+1. **Widget'i Tıkla** — Ekranda yüzen "T" logosu
+2. **Sohbeti Aç** — Sohbet penceresi belirecek
+3. **Mesaj Gönder** — Türkçe olarak komut yaz
+4. **ESC Tuşu** — Sohbeti kapat
+
+### Örnek Komutlar
+- "Dosyaları listele"
+- "Google'da ara: Python öğretimi"
+- "Not defterini aç"
+- "Sistem bilgisini göster"
+
+---
+
+## Ayarlar (`config.py`)
+
+```python
+RESPONDER_MODEL = "qwen2.5:7b"  # Kullanılacak Ollama modeli
+OLLAMA_URL = "http://localhost:11434/api"  # Ollama sunucu adresi
+LOCAL_ROUTER_PATH = "./tenra_v5/merged_model"  # Router model yolu
+```
+
+---
+
+## Sorun Giderme
+
+### "Ollama sunucusu çalışmıyor"
+```bash
+# Yeni terminal'de:
+ollama serve
+```
+
+### "Modeller yüklenmedi"
+```bash
+ollama pull qwen2.5:7b
+```
+
+### "PySide6 hatası"
+```bash
+pip install --upgrade PySide6
+```
+
+### "Genel sorun"
+Kontrol aracını çalıştırın:
+```bash
+python check_setup.py
+```
+
+---
+
+## Mimari
+
+```
+tenra_v5/
+├── main.py                    # GUI ve Ana uygulama
+├── config.py                  # Merkezi ayarlar
+├── core/
+│   ├── llm.py                # LLM arayüzü
+│   ├── router.py             # İstek yönlendirme
+│   ├── function_executor.py  # İşlev çalıştırıcı
+│   └── ...
+├── merged_model/             # Yerel router modeli
+└── data/                      # Veritabanları
+```
+
+---
+
+## Geliştirme
+
+Yeni işlevler eklemek için `tenra_v5/core/function_executor.py` dosyasını düzenleyin.
+
+---
+
+## Lisans
+
+Tenra V5 — Özel Kullanım Yazılımı
+

@@ -1,0 +1,72 @@
+🎯 TENRA V5 — HIZLI BAŞLAT REHBERI
+
+════════════════════════════════════════════════════════════════
+
+ADIM 1: ÖN KOŞUL (Sadece ilk defa)
+════════════════════════════════════════════════════════════════
+
+✓ Python 3.11+ kurulu mı?
+  → Eğer yoksa: https://python.org adresinden indirin
+
+✓ Ollama kurulu mu?
+  → Eğer yoksa: https://ollama.ai adresinden indirin
+  → Ardından terminalde çalıştırın: ollama serve
+  → Başka bir terminalde: ollama pull qwen2.5:7b
+
+════════════════════════════════════════════════════════════════
+
+ADIM 2: ÇÖP KALDIRMA (Zaten yapılmış)
+════════════════════════════════════════════════════════════════
+
+✓ Gereksiz dosyalar silindi
+✓ Sadece Tenra V5 kaldı
+✓ Web kısmı kaldırıldı
+
+════════════════════════════════════════════════════════════════
+
+ADIM 3: ÇALIŞ!
+════════════════════════════════════════════════════════════════
+
+🚀 run_tenra_v5.bat dosyasına çift tıkla!
+
+İşte bu kadar. Gerisi otomatik:
+  • Sanal ortam oluşturulacak
+  • Paketler kurulacak
+  • Sistem kontrol edilecek
+  • Tenra V5 başlatılacak
+
+════════════════════════════════════════════════════════════════
+
+SORUN YAŞIYORSAN
+════════════════════════════════════════════════════════════════
+
+1. "Ollama sunucusu çalışmıyor" hatası?
+   → Terminalde yeni pencere aç
+   → Komut: ollama serve
+   → run_tenra_v5.bat'ı tekrar çalıştır
+
+2. "PySide6 hatası" veya paket kurulmadı?
+   → Terminalde aç (.venv aktif ol)
+   → Komut: pip install -r tenra_v5\requirements.txt
+
+3. "Model yüklenmiyor" hatası?
+   → Ollama'da model yükle: ollama pull qwen2.5:7b
+
+4. Diğer sorunlar?
+   → Terminalde çalıştır: python check_setup.py
+   → Çıktı sorunun ne olduğunu gösterecek
+
+════════════════════════════════════════════════════════════════
+
+AYARLAR
+════════════════════════════════════════════════════════════════
+
+✏️ Ayarları düzenlemek için: tenra_v5\config.py
+  • Modeli değiştir: RESPONDER_MODEL = "llama3:latest"
+  • Ollama URL: OLLAMA_URL = "http://localhost:11434/api"
+  • Özellikler: VOICE_ASSISTANT_ENABLED, TTS vb.
+
+════════════════════════════════════════════════════════════════
+
+İYİ KULLANIMLAR! 🎉
+

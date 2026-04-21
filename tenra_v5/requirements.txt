@@ -10,3 +10,4 @@ keyboard>=0.13.5
 send2trash>=1.8.0
 duckduckgo-search>=4.0
 piper-tts>=1.0.0
+python-dotenv>=1.0.0

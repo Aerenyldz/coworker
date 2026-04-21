@@ -2,12 +2,18 @@
 Tenra V5 — Merkezi Ayarlar
 """
 
+import os
+
 # --- Model Configuration ---
-RESPONDER_MODEL = "qwen2.5:7b"
+RESPONDER_MODEL = "qwen2.5:7b"  # Ollama'dan çekilecek model
 OLLAMA_URL = "http://localhost:11434/api"
-LOCAL_ROUTER_PATH = "./merged_model"
-HF_ROUTER_REPO = "nlouis/pocket-ai-router"  # ADA'nın hazır router'ı
+LOCAL_ROUTER_PATH = os.path.join(os.path.dirname(__file__), "merged_model")
+HF_ROUTER_REPO = "nlouis/pocket-ai-router"  # Yedek router repo
 MAX_HISTORY = 20
+
+# --- Runtime Flags ---
+SKIP_ROUTER_ON_ERROR = True  # Router hata verirse direkt Ollama kullan
+ROUTER_TIMEOUT = 30  # Router max çalışma süresi (saniye)
 
 # --- Tenra Identity ---
 APP_NAME = "Tenra"
