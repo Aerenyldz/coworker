@@ -39,9 +39,10 @@ QWEN_TIMEOUT_SECONDS = 300
 QWEN_KEEP_ALIVE = "30m"
 
 # --- Paths ---
-import os
 USER_HOME = os.path.expanduser("~")
-DESKTOP_PATH = os.path.join(USER_HOME, "OneDrive", "Desktop")
+_ONEDRIVE_DESKTOP = os.path.join(USER_HOME, "OneDrive", "Desktop")
+_CLASSIC_DESKTOP = os.path.join(USER_HOME, "Desktop")
+DESKTOP_PATH = _ONEDRIVE_DESKTOP if os.path.isdir(_ONEDRIVE_DESKTOP) else _CLASSIC_DESKTOP
 
 # --- Console Colors ---
 GRAY = "\033[90m"

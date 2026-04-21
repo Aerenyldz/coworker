@@ -55,6 +55,7 @@ class TenraFunctionExecutor:
         
         self.active_timers: Dict[str, ActiveTimer] = {}
         self._timer_lock = threading.Lock()
+        self.smart_lights: Dict[str, Dict[str, Any]] = {}
         
         self._init_managers()
 
@@ -91,7 +92,9 @@ class TenraFunctionExecutor:
                 "open_url": self._open_url,
                 "list_desktop": self._list_desktop,
                 # === ADA Fonksiyonları ===
+                "control_light": self._control_light,
                 "set_timer": self._set_timer,
+                "set_alarm": self._set_alarm,
                 "create_calendar_event": self._create_calendar_event,
                 "add_task": self._add_task,
                 "web_search": self._web_search,
@@ -239,6 +242,41 @@ class TenraFunctionExecutor:
     # ADA FONKSİYONLARI (KORUNDU)
     # ═══════════════════════════════════════════════
 
+    def _control_light(self, params: Dict) -> Dict:
+        action = str(params.get("action", "toggle")).lower().strip()
+        device = str(params.get("device_name", "varsayilan")).strip() or "varsayilan"
+        brightness = params.get("brightness")
+        color = str(params.get("color", "")).strip() or None
+
+        state = self.smart_lights.get(device, {"name": device, "is_on": False, "brightness": 100, "color": None})
+
+        if action == "on":
+            state["is_on"] = True
+        elif action == "off":
+            state["is_on"] = False
+        elif action == "toggle":
+            state["is_on"] = not state["is_on"]
+        elif action == "dim":
+            state["is_on"] = True
+            if isinstance(brightness, int):
+                state["brightness"] = max(0, min(100, brightness))
+        else:
+            return {"success": False, "message": f"Desteklenmeyen ışık aksiyonu: {action}", "data": None}
+
+        if isinstance(brightness, int):
+            state["brightness"] = max(0, min(100, brightness))
+        if color:
+            state["color"] = color
+
+        self.smart_lights[device] = state
+
+        on_off = "açık" if state["is_on"] else "kapalı"
+        msg = f"Işık güncellendi: {device} -> {on_off}, parlaklık %{state['brightness']}"
+        if state.get("color"):
+            msg += f", renk {state['color']}"
+
+        return {"success": True, "message": msg, "data": state}
+
     def _set_timer(self, params: Dict) -> Dict:
         duration_str = params.get("duration", "")
         label = params.get("label", "Zamanlayıcı")
@@ -267,7 +305,7 @@ class TenraFunctionExecutor:
     def _create_calendar_event(self, params: Dict) -> Dict:
         title = params.get("title", "Etkinlik")
         date = params.get("date", "today")
-        time_str = params.get("time", "09:00")
+        time_str = self._normalize_time(params.get("time", "09:00"))
         if not self.calendar_manager:
             return {"success": False, "message": "Takvim yöneticisi yüklenemedi", "data": None}
         event_date = self._parse_date(date)
@@ -283,6 +321,23 @@ class TenraFunctionExecutor:
             return {"success": True, "message": f"📅 '{title}' etkinliği oluşturuldu ({date})", "data": event}
         return {"success": False, "message": "Etkinlik oluşturulamadı", "data": None}
 
+    def _set_alarm(self, params: Dict) -> Dict:
+        time_str = str(params.get("time", "")).strip()
+        label = str(params.get("label", "Alarm")).strip() or "Alarm"
+        if not time_str:
+            return {"success": False, "message": "Alarm zamanı belirtilmedi", "data": None}
+        if not self.task_manager:
+            return {"success": False, "message": "Alarm yöneticisi yüklenemedi", "data": None}
+
+        alarm_id = self.task_manager.add_alarm(time_str, label)
+        if alarm_id:
+            return {
+                "success": True,
+                "message": f"⏰ Alarm kuruldu: {time_str} ({label})",
+                "data": {"id": alarm_id, "time": time_str, "label": label},
+            }
+        return {"success": False, "message": "Alarm oluşturulamadı", "data": None}
+
     def _parse_date(self, date_str: str) -> str:
         date_str = date_str.lower().strip()
         today = datetime.now()
@@ -290,7 +345,40 @@ class TenraFunctionExecutor:
             return today.strftime("%Y-%m-%d")
         elif date_str in ("tomorrow", "yarın"):
             return (today + timedelta(days=1)).strftime("%Y-%m-%d")
+        for fmt in ("%Y-%m-%d", "%d.%m.%Y", "%d/%m/%Y"):
+            try:
+                return datetime.strptime(date_str, fmt).strftime("%Y-%m-%d")
+            except ValueError:
+                continue
         return today.strftime("%Y-%m-%d")
+
+    def _normalize_time(self, time_value: Any) -> str:
+        raw = str(time_value or "").strip().lower()
+        if not raw:
+            return "09:00"
+
+        compact = raw.replace(" ", "").replace(".", ":")
+        for fmt in ("%H:%M", "%H", "%I%p", "%I:%M%p"):
+            try:
+                parsed = datetime.strptime(compact, fmt)
+                return parsed.strftime("%H:%M")
+            except ValueError:
+                continue
+
+        import re
+
+        match = re.search(r"(\d{1,2})(?::(\d{2}))?", compact)
+        if match:
+            hour = int(match.group(1))
+            minute = int(match.group(2) or 0)
+            if "pm" in compact and hour < 12:
+                hour += 12
+            if "am" in compact and hour == 12:
+                hour = 0
+            if 0 <= hour <= 23 and 0 <= minute <= 59:
+                return f"{hour:02d}:{minute:02d}"
+
+        return "09:00"
 
     def _add_task(self, params: Dict) -> Dict:
         text = params.get("text", "")
@@ -322,9 +410,12 @@ class TenraFunctionExecutor:
         info = {
             "current_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "timers": [],
+            "alarms": [],
             "calendar_today": [],
             "tasks": [],
             "weather": None,
+            "smart_devices": [],
+            "news": [],
             "desktop_files": len(os.listdir(self.desktop_path)) if os.path.exists(self.desktop_path) else 0
         }
         with self._timer_lock:
@@ -339,6 +430,11 @@ class TenraFunctionExecutor:
                 info["tasks"] = [{"text": t["text"], "completed": t["completed"]} for t in tasks]
             except:
                 pass
+            try:
+                alarms = self.task_manager.get_alarms()
+                info["alarms"] = [{"time": a.get("time"), "label": a.get("label")} for a in alarms]
+            except:
+                pass
         if self.calendar_manager:
             try:
                 today = datetime.now().strftime("%Y-%m-%d")
@@ -349,10 +445,12 @@ class TenraFunctionExecutor:
         if self.weather_manager:
             try:
                 weather = self.weather_manager.get_weather()
-                if weather and "current" in weather:
-                    info["weather"] = weather["current"]
+                if weather:
+                    info["weather"] = weather
             except:
                 pass
+
+        info["smart_devices"] = list(self.smart_lights.values())
         return {"success": True, "message": "Sistem bilgisi alındı", "data": info}
 
 

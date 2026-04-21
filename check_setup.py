@@ -1,84 +1,92 @@
 #!/usr/bin/env python
 """
-Tenra V5 — Kurulum Kontrol Aracı
-Tüm bağımlılıkların ve sistemin hazır olup olmadığını kontrol eder.
+Tenra V5 setup checker.
+Validates Python environment, dependencies, Ollama access and model files.
 """
 
-import sys
 import os
+import sys
 
-print("=" * 60)
-print("TENRA V5 — KURULUM KONTROL")
-print("=" * 60)
-print()
 
-# 1. Python sürümü
-print(f"✓ Python: {sys.version}")
-print()
+def main() -> int:
+    all_ok = True
 
-# 2. Temel paketler
-print("Paket kontrolleri:")
-packages = [
-    ("PySide6", "PySide6"),
-    ("requests", "requests"),
-    ("torch", "torch"),
-    ("transformers", "transformers"),
-    ("keyboard", "keyboard"),
-    ("pyautogui", "pyautogui"),
-]
+    print("=" * 60)
+    print("TENRA V5 - SETUP CHECK")
+    print("=" * 60)
+    print()
 
-all_ok = True
-for pkg_name, import_name in packages:
+    # 1) Python version
+    print(f"[OK] Python: {sys.version}")
+    print()
+
+    # 2) Required packages
+    print("Package checks:")
+    packages = [
+        ("PySide6", "PySide6"),
+        ("requests", "requests"),
+        ("torch", "torch"),
+        ("transformers", "transformers"),
+        ("keyboard", "keyboard"),
+        ("pyautogui", "pyautogui"),
+    ]
+
+    for pkg_name, import_name in packages:
+        try:
+            __import__(import_name)
+            print(f"  [OK] {pkg_name}")
+        except ImportError as err:
+            print(f"  [ERR] {pkg_name} - {err}")
+            all_ok = False
+
+    print()
+
+    # 3) Ollama connectivity
+    print("System checks:")
     try:
-        __import__(import_name)
-        print(f"  ✓ {pkg_name}")
-    except ImportError as e:
-        print(f"  ✗ {pkg_name} — {e}")
+        import requests
+
+        response = requests.get("http://localhost:11434/api/tags", timeout=3)
+        if response.status_code == 200:
+            data = response.json()
+            models = [m["name"] for m in data.get("models", [])]
+            print("  [OK] Ollama is running")
+            print(f"       Installed models: {', '.join(models) if models else 'none'}")
+        else:
+            print(f"  [ERR] Ollama returned status {response.status_code}")
+            all_ok = False
+    except Exception as err:
+        print(f"  [ERR] Ollama check failed: {err}")
+        print("       Solution: run 'ollama serve' in a terminal")
         all_ok = False
 
-print()
+    print()
 
-# 3. Ollama bağlantısı
-print("Sistem kontrolleri:")
-try:
-    import requests
-    response = requests.get("http://localhost:11434/api/tags", timeout=3)
-    if response.status_code == 200:
-        data = response.json()
-        models = [m["name"] for m in data.get("models", [])]
-        print(f"  ✓ Ollama çalışıyor")
-        print(f"    Yüklü modeller: {', '.join(models) if models else 'Hiç model yok!'}")
+    # 4) Local router model files
+    print("Model files:")
+    model_path = os.path.join(os.path.dirname(__file__), "tenra_v5", "merged_model")
+    if os.path.exists(model_path):
+        files = os.listdir(model_path)
+        preview = ", ".join(files[:3])
+        suffix = "..." if len(files) > 3 else ""
+        print(f"  [OK] {model_path} exists")
+        print(f"       Files: {preview}{suffix}")
     else:
-        print(f"  ✗ Ollama yanıt vermiyor ({response.status_code})")
+        print(f"  [ERR] Missing folder: {model_path}")
         all_ok = False
-except requests.exceptions.ConnectionError:
-    print(f"  ✗ Ollama bağlantısı kurulamadı")
-    print(f"    Çözüm: 'ollama serve' komutunu terminalde çalıştırın")
-    all_ok = False
-except Exception as e:
-    print(f"  ✗ Ollama kontrol hatası: {e}")
-    all_ok = False
 
-print()
+    print()
 
-# 4. Model dosyaları
-print("Model dosyaları:")
-model_path = os.path.join(os.path.dirname(__file__), "tenra_v5", "merged_model")
-if os.path.exists(model_path):
-    files = os.listdir(model_path)
-    print(f"  ✓ {model_path} var")
-    print(f"    Dosyalar: {', '.join(files[:3])}{'...' if len(files) > 3 else ''}")
-else:
-    print(f"  ✗ {model_path} bulunamadı")
-    all_ok = False
+    print("=" * 60)
+    if all_ok:
+        print("[OK] READY - You can run run_tenra_v5.bat")
+    else:
+        print("[ERR] ISSUES FOUND - Review messages above")
+    print("=" * 60)
 
-print()
+    return 0 if all_ok else 1
 
-# 5. Sonuç
-print("=" * 60)
-if all_ok:
-    print("✓ HER ŞEY HAZIR — run_tenra_v5.bat çalıştırabilirsiniz!")
-else:
-    print("✗ BAZI SORUNLAR VAR — Yukarıdaki uyarıları kontrol edin")
-print("=" * 60)
+
+if __name__ == "__main__":
+    raise SystemExit(main())
 
