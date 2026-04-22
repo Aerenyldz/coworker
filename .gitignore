@@ -11,6 +11,7 @@ __pycache__/
 # Runtime data
 tenra_v5/data/*.db
 tenra_v5/data/screenshots/
+tenra_v5/data/browser_profiles/
 *.db
 
 # Local secrets

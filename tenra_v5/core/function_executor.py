@@ -7,6 +7,8 @@ import os
 import glob
 import subprocess
 import webbrowser
+import tempfile
+import shutil
 from datetime import datetime, timedelta
 from typing import Dict, Any
 from dataclasses import dataclass
@@ -86,14 +88,14 @@ class TenraFunctionExecutor:
         
         # 1. Aşama: Eş Anlamlılar (Synonyms) Toleransı
         synonyms = {
-            "make_dir": "create_folder", "mkdir": "create_folder",
-            "remove_file": "delete_file", "del_file": "delete_file", "rm": "delete_file",
-            "open_website": "open_url", "visit_url": "open_url", "visit": "open_url",
+            "make_dir": "create_folder", "mkdir": "create_folder", "klasör oluştur": "create_folder", "yeni klasör": "create_folder",
+            "remove_file": "delete_file", "del_file": "delete_file", "rm": "delete_file", "sil": "delete_file", "yok et": "delete_file", "kaldır": "delete_file",
+            "open_website": "open_url", "visit_url": "open_url", "visit": "open_url", "siteye git": "open_url",
             "browse": "browse_website", "read_website": "browse_website",
-            "run": "open_app", "start_app": "open_app", "execute": "run_command",
-            "search": "web_search", "find": "find_file", "google": "web_search",
-            "create_text": "create_file", "new_file": "create_file",
-            "type": "type_text", "write": "type_text"
+            "run": "open_app", "start_app": "open_app", "execute": "run_command", "aç": "open_app", "başlat": "open_app", "çalıştır": "open_app",
+            "search": "web_search", "find": "find_file", "google": "web_search", "ara": "web_search", "internette ara": "web_search",
+            "create_text": "create_file", "new_file": "create_file", "dosya oluştur": "create_file",
+            "type": "type_text", "write": "type_text", "yaz": "type_text"
         }
         
         if func_name in synonyms:
@@ -107,30 +109,51 @@ class TenraFunctionExecutor:
             "list_directory": self._list_directory, "run_command": self._run_command,
             "open_app": self._open_app, "open_url": self._open_url, "list_desktop": self._list_desktop,
             "click_screen": self._click_screen, "type_text": self._type_text, "press_hotkey": self._press_hotkey,
+            "click_element_by_image": self._click_element_by_image, "click_text_on_screen": self._click_text_on_screen,
             "execute_python": self._execute_python, "browse_website": self._browse_website,
             "control_light": self._control_light, "set_timer": self._set_timer, "set_alarm": self._set_alarm,
             "create_calendar_event": self._create_calendar_event, "add_task": self._add_task,
             "web_search": self._web_search, "get_system_info": self._get_system_info
         }
         
-        # 2. Aşama: Fuzzy Matching (Esnek Yazım Toleransı)
+        # 2. Aşama: Gelişmiş Heuristic / Dinamik Fuzzy Matching
         if func_name not in handler_map:
-            matches = difflib.get_close_matches(func_name, handler_map.keys(), n=1, cutoff=0.75)
-            if matches:
-                print(f"[Tenra Fuzzy Intent] '{func_name}' komutu anlaşılamadı, '{matches[0]}' olarak kabul edildi.")
-                func_name = matches[0]
+            # Kritik işlemlerde kesinlik (0.85), basitlerde esneklik (0.50)
+            critical_tools = {"delete_file", "run_command", "patch", "write_file", "move_to_trash", "execute_python"}
+            
+            best_match = None
+            best_score = 0.0
+            
+            for tool in handler_map.keys():
+                score = difflib.SequenceMatcher(None, func_name, tool).ratio()
+                if score > best_score:
+                    best_score = score
+                    best_match = tool
+            
+            if best_match:
+                cutoff = 0.85 if best_match in critical_tools else 0.50
+                if best_score >= cutoff:
+                    print(f"[Tenra Smart Intent] '{func_name}' komutu anlaşılamadı, anlamsal olarak '{best_match}' (score: {best_score:.2f}) kabul edildi.")
+                    func_name = best_match
 
         risky_functions = {
-            "write_file", "patch", "delete_file", "move_to_trash", 
-            "rename_file", "run_command", "create_file", "create_folder",
-            "send_email", "open_app", "open_url", "click_screen", "type_text", "press_hotkey",
-            "execute_python"
+            "write_file",
+            "patch",
+            "delete_file",
+            "move_to_trash",
+            "rename_file",
+            "run_command",
+            "click_screen",
+            "press_hotkey",
+            "click_element_by_image",
+            "click_text_on_screen",
+            "execute_python",
         }
         
         if func_name in risky_functions and self.approval_callback:
             approved = self.approval_callback(func_name, params)
             if not approved:
-                return {"status": "error", "message": f"Kullanıcı eylemi reddetti: {func_name}"}
+                return {"success": False, "message": f"Kullanıcı eylemi reddetti: {func_name}", "data": None}
                 
         try:
             handler = handler_map.get(func_name)
@@ -208,6 +231,60 @@ class TenraFunctionExecutor:
             return {"success": False, "message": "x ve y koordinatları gerekli.", "data": None}
         except Exception as e:
             return {"success": False, "message": f"Mouse tıklama hatası: {e}", "data": None}
+
+    def _click_element_by_image(self, params: Dict) -> Dict:
+        """Ekrandaki bir görsele/ikona tıklar."""
+        try:
+            import pyautogui
+            image_path = params.get("image_path", "")
+            if not image_path or not os.path.exists(image_path):
+                return {"success": False, "message": f"Şablon görsel bulunamadı: {image_path}", "data": None}
+            
+            # locateCenterOnScreen kullan
+            location = pyautogui.locateCenterOnScreen(image_path, confidence=0.8)
+            if location:
+                pyautogui.click(location.x, location.y)
+                return {"success": True, "message": f"'{image_path}' görseline tıklandı.", "data": None}
+            return {"success": False, "message": "Ekranda bulunamadı, kaydır (scroll) yapmayı deneyin", "data": None}
+        except Exception as e:
+            return {"success": False, "message": f"Görsele tıklama hatası: {e}", "data": None}
+
+    def _click_text_on_screen(self, params: Dict) -> Dict:
+        """Ekranda görünen bir metni arayıp koordinatını bulur ve tıklar."""
+        try:
+            import pyautogui
+            import pytesseract
+            
+            # Windows tesseract_cmd path detection
+            tesseract_paths = [
+                r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+                r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+                os.path.join(os.environ.get("LOCALAPPDATA", ""), "Tesseract-OCR", "tesseract.exe")
+            ]
+            for p in tesseract_paths:
+                if os.path.exists(p):
+                    pytesseract.pytesseract.tesseract_cmd = p
+                    break
+            
+            target_text = params.get("text", "").lower()
+            if not target_text:
+                return {"success": False, "message": "Aranacak metin belirtilmedi.", "data": None}
+                
+            screenshot = pyautogui.screenshot()
+            data = pytesseract.image_to_data(screenshot, output_type=pytesseract.Output.DICT)
+            
+            for i in range(len(data['text'])):
+                word = data['text'][i].lower()
+                if target_text in word and int(data['conf'][i]) > 60:
+                    x = data['left'][i] + (data['width'][i] / 2)
+                    y = data['top'][i] + (data['height'][i] / 2)
+                    pyautogui.click(x, y)
+                    return {"success": True, "message": f"'{target_text}' metnine tıklandı.", "data": None}
+                    
+            return {"success": False, "message": "Ekranda bulunamadı, kaydır (scroll) yapmayı deneyin", "data": None}
+            
+        except Exception as e:
+            return {"success": False, "message": f"Ekran metni bulma hatası: {e}", "data": None}
 
     def _type_text(self, params: Dict) -> Dict:
         """Klavyeden metin yazar."""
@@ -360,6 +437,17 @@ class TenraFunctionExecutor:
                     matches_no_ext = difflib.get_close_matches(base_name, list(files_no_ext.keys()), n=1, cutoff=0.45)
                     if matches_no_ext:
                         path = os.path.join(parent_dir, files_no_ext[matches_no_ext[0]])
+
+                # Space-insensitive exact fallback (e.g. "hermes denem v2" vs "hermesdenemv2")
+                if not os.path.exists(path):
+                    try:
+                        lowered = base_name.lower().strip()
+                        compact = lowered.replace(" ", "")
+                        exact = [f for f in files if f.lower() == lowered or f.lower().replace(" ", "") == compact]
+                        if exact:
+                            path = os.path.join(parent_dir, exact[0])
+                    except Exception:
+                        pass
 
         if not os.path.exists(path):
             return {"success": False, "message": f"Dosya bulunamadı: {path}", "data": None}
@@ -720,8 +808,154 @@ class TenraFunctionExecutor:
             return {"success": False, "message": "URL belirtilmedi", "data": None}
         if not url.startswith("http"):
             url = "https://" + url
+
+        from config import (
+            BROWSER_FRESH_SESSION,
+            BROWSER_PRIVATE_MODE,
+            BROWSER_PREFERRED,
+            BROWSER_PROFILE_ROOT,
+        )
+
+        if not BROWSER_FRESH_SESSION and not BROWSER_PRIVATE_MODE:
+            if BROWSER_PREFERRED != "auto" and BROWSER_PREFERRED != "default":
+                browser_name, exe_path = self._find_browser_executable(BROWSER_PREFERRED)
+                if exe_path:
+                    import subprocess
+                    subprocess.Popen([exe_path, url])
+                    return {
+                        "success": True,
+                        "message": f"Tarayıcıda ({browser_name}) açıldı: {url}",
+                        "data": {"url": url, "mode": f"{browser_name}-default"},
+                    }
+
+            webbrowser.open(url)
+            return {
+                "success": True,
+                "message": f"Tarayıcıda açıldı: {url}",
+                "data": {"url": url, "mode": "default"},
+            }
+
+        launch = self._launch_isolated_browser(
+            url=url,
+            preferred=BROWSER_PREFERRED,
+            profile_root=BROWSER_PROFILE_ROOT,
+            private_mode=BROWSER_PRIVATE_MODE,
+            fresh_session=BROWSER_FRESH_SESSION,
+        )
+
+        if launch.get("success"):
+            return {
+                "success": True,
+                "message": launch.get("message", f"Tarayıcıda açıldı: {url}"),
+                "data": launch.get("data"),
+            }
+
+        # fallback
         webbrowser.open(url)
-        return {"success": True, "message": f"Tarayıcıda açıldı: {url}", "data": None}
+        return {
+            "success": True,
+            "message": f"Tarayıcı (fallback) ile açıldı: {url}",
+            "data": {"url": url, "mode": "fallback-default", "warning": launch.get("message", "")},
+        }
+
+    def _find_browser_executable(self, preferred: str) -> tuple[str | None, str | None]:
+        candidates = []
+
+        edge_paths = [
+            os.path.join(os.environ.get("ProgramFiles(x86)", ""), "Microsoft", "Edge", "Application", "msedge.exe"),
+            os.path.join(os.environ.get("ProgramFiles", ""), "Microsoft", "Edge", "Application", "msedge.exe"),
+        ]
+        chrome_paths = [
+            os.path.join(os.environ.get("ProgramFiles(x86)", ""), "Google", "Chrome", "Application", "chrome.exe"),
+            os.path.join(os.environ.get("ProgramFiles", ""), "Google", "Chrome", "Application", "chrome.exe"),
+        ]
+        firefox_paths = [
+            os.path.join(os.environ.get("ProgramFiles", ""), "Mozilla Firefox", "firefox.exe"),
+            os.path.join(os.environ.get("ProgramFiles(x86)", ""), "Mozilla Firefox", "firefox.exe"),
+        ]
+
+        if preferred == "edge":
+            candidates = [("edge", p) for p in edge_paths]
+        elif preferred == "chrome":
+            candidates = [("chrome", p) for p in chrome_paths]
+        elif preferred == "firefox":
+            candidates = [("firefox", p) for p in firefox_paths]
+        elif preferred == "default":
+            return None, None
+        else:
+            candidates = [("edge", p) for p in edge_paths] + [("chrome", p) for p in chrome_paths] + [("firefox", p) for p in firefox_paths]
+
+        for browser_name, path in candidates:
+            if path and os.path.exists(path):
+                return browser_name, path
+        return None, None
+
+    def _launch_isolated_browser(
+        self,
+        url: str,
+        preferred: str,
+        profile_root: str,
+        private_mode: bool,
+        fresh_session: bool,
+    ) -> Dict:
+        browser_name, exe_path = self._find_browser_executable(preferred)
+        if not exe_path:
+            return {"success": False, "message": "Tarayıcı yürütülebilir dosyası bulunamadı."}
+
+        try:
+            os.makedirs(profile_root, exist_ok=True)
+            cmd = [exe_path]
+
+            profile_dir = None
+            temp_profile = False
+
+            if browser_name in ("edge", "chrome"):
+                if fresh_session:
+                    profile_dir = tempfile.mkdtemp(prefix="tenra_profile_", dir=profile_root)
+                    temp_profile = True
+                    cmd.extend([f"--user-data-dir={profile_dir}", "--no-first-run", "--new-window"])
+                elif private_mode:
+                    cmd.append("--incognito")
+
+            elif browser_name == "firefox":
+                if fresh_session:
+                    profile_dir = tempfile.mkdtemp(prefix="tenra_ff_profile_", dir=profile_root)
+                    temp_profile = True
+                    cmd.extend(["-profile", profile_dir, "-new-window"])
+                elif private_mode:
+                    cmd.append("-private-window")
+
+            cmd.append(url)
+
+            creation_flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+            process = subprocess.Popen(cmd, creationflags=creation_flags)
+
+            if temp_profile:
+                def cleanup_temp_profile(proc, path):
+                    try:
+                        proc.wait(timeout=8 * 60 * 60)
+                    except Exception:
+                        return
+                    try:
+                        shutil.rmtree(path, ignore_errors=True)
+                    except Exception:
+                        pass
+
+                threading.Thread(target=cleanup_temp_profile, args=(process, profile_dir), daemon=True).start()
+
+            mode = "fresh-session" if fresh_session else ("private" if private_mode else "default")
+            return {
+                "success": True,
+                "message": f"Izole tarayici penceresinde açıldı: {url}",
+                "data": {
+                    "url": url,
+                    "browser": browser_name,
+                    "mode": mode,
+                    "profile": profile_dir,
+                },
+            }
+        except Exception as e:
+            return {"success": False, "message": f"Izole tarayıcı başlatma hatası: {e}"}
 
     def _list_desktop(self, params: Dict) -> Dict:
         """Masaüstü dosyalarını listele."""

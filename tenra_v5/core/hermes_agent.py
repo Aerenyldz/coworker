@@ -23,7 +23,8 @@ from config import (
     MAX_TOOL_STEPS,
     OLLAMA_URL,
     RESPONDER_MODEL,
-    SCREEN_ANALYZER_MODEL,
+    VISION_MODEL,
+    VISION_SYSTEM_PROMPT,
     USE_LOCAL_ROUTER,
 )
 
@@ -33,6 +34,64 @@ from config import (
 # ═══════════════════════════════════════════════
 
 TOOL_SCHEMAS: List[Dict[str, Any]] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "click_screen",
+            "description": "ZORUNLU OLMADIKÇA KULLANMA. Ekrandaki (x, y) koordinatina tiklar. Bunun yerine ekranda gördüğün metne tıklamak için 'click_text_on_screen' aracını kullan.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "x": {"type": "integer", "description": "X koordinati"},
+                    "y": {"type": "integer", "description": "Y koordinati"},
+                },
+                "required": ["x", "y"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "click_text_on_screen",
+            "description": "Ekranda bir butona, sekmeye veya metne tıklaman gerekiyorsa, ASLA koordinat (x,y) tahmin etmeye çalışma. Bu aracı kullanarak doğrudan tıklamak istediğin metni yaz. Sistem OCR ile bulup tıklayacaktır.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "Tıklanacak metin veya buton yazısı. Örnek: 'Gönder', 'Kaydet', 'Login'"},
+                },
+                "required": ["text"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "click_element_by_image",
+            "description": "Ekranda metin olmayan ama görselini bildiğin bir ikona (resim şablonuna) tıklar.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "image_path": {"type": "string", "description": "Tıklanacak görselin dosya yolu (örnek: 'ikon.png')"},
+                },
+                "required": ["image_path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "type_text",
+            "description": "Klavyeden metin yazar ve istenirse Enter'a basar.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "Yazilacak metin"},
+                    "press_enter": {"type": "boolean", "description": "Metni yazdiktan sonra Enter tusuna basilsin mi?", "default": True},
+                },
+                "required": ["text"],
+            },
+        },
+    },
     {
         "type": "function",
         "function": {
@@ -623,12 +682,49 @@ def _normalize_tool_args(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
         if not args.get("path") and args.get("name"):
             args["path"] = args["name"]
 
+    # move_to_trash / delete_file: alternate keys
+    if name in ("move_to_trash", "delete_file"):
+        if not args.get("path"):
+            for alt in ("filename", "file", "target", "name"):
+                if args.get(alt):
+                    args["path"] = args[alt]
+                    break
+
     # create_file: ensure path exists
     if name == "create_file":
         if not args.get("content"):
             args["content"] = ""
 
     return args
+
+
+def optimize_chat_history(history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Chat geçmişindeki çok uzun metinleri sıkıştırır, eski base64 resimleri siler ve listeyi kırpar."""
+    if not history:
+        return []
+        
+    import copy
+    from config import MAX_HISTORY
+    
+    optimized = copy.deepcopy(history)
+    
+    # 1. Base64 Temizliği (Eski resimleri sil, sadece son eklenenler kalsın)
+    for i in range(len(optimized) - 1):
+        if "images" in optimized[i]:
+            del optimized[i]["images"]
+            
+    # 2. Context Compression (Metin Sıkıştırma)
+    for msg in optimized:
+        content = msg.get("content", "")
+        if isinstance(content, str) and len(content) > 1500:
+            if "--- GÖRSEL İÇERİĞİ ---" in content or "--- OCR İLE OKUNAN METİN ---" in content:
+                msg["content"] = "[Geçmiş görsel/OCR metni çok uzun olduğu için bellekten temizlendi. Orijinal soru korundu.]"
+            else:
+                msg["content"] = content[:500] + "\n...[METİN UZUNLUĞU NEDENİYLE KISALTILDI]...\n" + content[-300:]
+                
+    # 3. Sliding Window Memory
+    limit = MAX_HISTORY if MAX_HISTORY else 10
+    return optimized[-limit:]
 
 
 # ═══════════════════════════════════════════════
@@ -676,7 +772,8 @@ def run_hermes_tool_loop(user_input: str, executor: Any, chat_history: list = No
     ]
     
     if chat_history:
-        messages.extend(chat_history)
+        optimized_history = optimize_chat_history(chat_history)
+        messages.extend(optimized_history)
         # Ensure the current user_input is the last message if not already added
         if not messages or messages[-1].get("content") != user_input:
             messages.append({"role": "user", "content": user_input})
@@ -700,8 +797,15 @@ def run_hermes_tool_loop(user_input: str, executor: Any, chat_history: list = No
                         "num_predict": 512,
                     },
                 },
-                timeout=120,
+                timeout=600,
             )
+        except requests.exceptions.ReadTimeout:
+            return {
+                "ok": False,
+                "reply": "",
+                "tool_results": tool_results,
+                "error": "Ollama istek zaman aşımına uğradı (600sn Timeout). Cihazınız modeli çalıştırırken yavaş kalmış olabilir.",
+            }
         except requests.exceptions.ConnectionError:
             return {
                 "ok": False,
@@ -753,6 +857,7 @@ def run_hermes_tool_loop(user_input: str, executor: Any, chat_history: list = No
                 # Add tool result to conversation
                 messages.append({
                     "role": "tool",
+                    "name": name,
                     "content": json.dumps(result, ensure_ascii=False),
                 })
 
@@ -773,6 +878,7 @@ def run_hermes_tool_loop(user_input: str, executor: Any, chat_history: list = No
                 messages.append({"role": "assistant", "content": assistant_text})
                 messages.append({
                     "role": "tool",
+                    "name": fn_name,
                     "content": json.dumps(result, ensure_ascii=False),
                 })
                 continue
@@ -815,39 +921,26 @@ def should_analyze_screenshot(user_input: str, screenshot_path: str | None) -> b
     """Check if the user's message should trigger screenshot analysis."""
     if not screenshot_path or not os.path.exists(screenshot_path):
         return False
-
-    normalized = user_input.lower()
-    hints = (
-        "ekran",
-        "goruntu",
-        "görüntü",
-        "gorsel",
-        "görsel",
-        "resim",
-        "ss",
-        "screenshot",
-        "buna bak",
-        "burada",
-        "bu ne",
-        "bunu analiz",
-        "bunu incele",
-        "ne görüyorsun",
-        "ne goruyorsun",
-    )
-    return any(hint in normalized for hint in hints)
+    return True
 
 
-def analyze_screenshot_question(user_input: str, screenshot_path: str) -> Dict[str, Any]:
-    """Analyze a screenshot using a vision-capable model."""
+def analyze_screenshot_question(user_input: str, screenshot_path: str, chat_history: list = None) -> Dict[str, Any]:
+    """Analyze a screenshot using a vision-capable model with an OCR fallback."""
     if not os.path.exists(screenshot_path):
         return {"ok": False, "reply": "", "error": "Ekran görüntüsü dosyası bulunamadı."}
 
-    model_name = SCREEN_ANALYZER_MODEL or RESPONDER_MODEL
-
+    model_name = VISION_MODEL or RESPONDER_MODEL
+    encoded_image = ""
     try:
         with open(screenshot_path, "rb") as image_file:
             encoded_image = base64.b64encode(image_file.read()).decode("ascii")
+    except Exception as e:
+        return {"ok": False, "reply": "", "error": f"Görsel okunamadı: {e}"}
 
+    extracted_text = ""
+
+    # 1. Aşama: GÖZ (Vision API veya OCR) ile veriyi çıkar
+    try:
         response = requests.post(
             f"{OLLAMA_URL}/chat",
             json={
@@ -855,41 +948,122 @@ def analyze_screenshot_question(user_input: str, screenshot_path: str) -> Dict[s
                 "messages": [
                     {
                         "role": "system",
-                        "content": (
-                            "Sen bir ekran görüntüsü analiz asistanısın. "
-                            "Kullanıcının ekranındaki görüntüyü analiz et ve "
-                            "sorularını kısa, doğru ve Türkçe olarak yanıtla."
-                        ),
+                        "content": VISION_SYSTEM_PROMPT,
                     },
                     {
                         "role": "user",
-                        "content": user_input,
+                        "content": "You are a strict OCR (Optical Character Recognition) engine. Your ONLY task is to extract ALL text, numbers, math formulas, and equations from the image VERBATIM. DO NOT describe the image. DO NOT write 'The image shows...'. Output EXACTLY the text found in the image, nothing else.",
                         "images": [encoded_image],
                     },
                 ],
                 "stream": False,
-                "options": {"temperature": 0.1},
+                "options": {
+                    "temperature": 0.1,
+                    "num_ctx": 2048,
+                },
             },
-            timeout=120,
+            timeout=45,
         )
 
-        if response.status_code != 200:
-            snippet = response.text[:200] if response.text else ""
-            return {
-                "ok": False,
-                "reply": "",
-                "error": f"Görüntü analizi başarısız ({response.status_code}): {snippet}",
-            }
+        if response.status_code == 200:
+            payload = response.json()
+            extracted_text = sanitize_assistant_text(payload.get("message", {}).get("content", ""))
+        else:
+            vision_error = f"Ollama HTTP {response.status_code}: {response.text[:200]}"
+            print(f"[Tenra Vision] {vision_error}")
+    except requests.exceptions.ReadTimeout:
+        vision_error = "Vision isteği zaman aşımına uğradı (45sn). Model yavaş kaldı."
+        print(f"[Tenra Vision] {vision_error}")
+    except Exception as e:
+        vision_error = f"Vision API Bağlantı Hatası: {e}"
+        print(f"[Tenra Vision] {vision_error}")
 
-        payload = response.json()
-        reply = sanitize_assistant_text(payload.get("message", {}).get("content", ""))
-        return {"ok": True, "reply": reply or "Görüntü analiz edildi.", "error": ""}
+    # Fallback: Eğer Vision modeli boş dönerse veya hata verirse
+    ocr_error = ""
+    if not extracted_text:
+        try:
+            from PIL import Image
+            import pytesseract
+            
+            # Windows tesseract_cmd path detection
+            tesseract_paths = [
+                r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+                r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+                os.path.join(os.environ.get("LOCALAPPDATA", ""), "Tesseract-OCR", "tesseract.exe")
+            ]
+            for p in tesseract_paths:
+                if os.path.exists(p):
+                    pytesseract.pytesseract.tesseract_cmd = p
+                    break
+                    
+            img = Image.open(screenshot_path)
+            try:
+                extracted_text = pytesseract.image_to_string(img, lang='eng+tur').strip()
+            except Exception as e:
+                # If language pack fails, try without lang argument
+                extracted_text = pytesseract.image_to_string(img).strip()
+        except Exception as e:
+            ocr_error = str(e)
+            print(f"[Tenra Vision] OCR hatasi: {e}")
+            
+    if not extracted_text:
+        err_msg = "Görselden ne Vision modeli ne de OCR ile okunabilir bir metin/veri çıkarılamadı."
+        if vision_error:
+            err_msg += f"\nVision Modeli Hatası: {vision_error}"
+        if ocr_error:
+            err_msg += f"\nOCR Sistem Hatası: {ocr_error}"
+        return {"ok": False, "reply": "", "error": err_msg}
 
-    except requests.exceptions.ConnectionError:
-        return {
-            "ok": False,
-            "reply": "",
-            "error": "Ollama sunucusuna bağlanılamadı.",
-        }
-    except Exception as err:
-        return {"ok": False, "reply": "", "error": str(err)}
+    # 2. Aşama: BEYİN (RESPONDER_MODEL) ile mantığı kur ve soruyu çöz
+    from config import HERMES_SYSTEM_PROMPT
+    
+    logic_prompt = (
+        f"Göz (Vision) modülüm bu fotoğrafı okudu ve şu metinleri çıkardı:\n\n"
+        f"--- GÖRSEL METNİ ---\n{extracted_text}\n---------------------\n\n"
+        f"Sorum/İsteğim şu: '{user_input}'\n\n"
+        f"Lütfen yukarıdaki verileri kullanarak bana DOĞRUDAN cevap ver. 3. tekil şahıs dili KULLANMA. Benimle doğrudan, samimi ve öğretici bir dille konuş.\n\n"
+        f"ÖNEMLİ FORMAT KURALLARI:\n"
+        f"1. Eğer bu bir matematik/fizik problemiyse, önce eldeki verileri (verilenler) listele.\n"
+        f"2. Kullanacağın formülleri açıkça belirt ve mantığını adım adım açıkla.\n"
+        f"3. Matematiksel işlemleri teker teker göster (gerekirse Markdown formatında).\n"
+        f"4. Sonuçları birimleriyle (örn: µC, Volt, Joule) birlikte çok net bir şekilde vurgula.\n"
+        f"5. Cevabına başlarken (İlk satırda), Göz modelinin sana ilettiği GÖRSEL METNİ'ni kısaca '(Okunan Metin: [buraya yaz])' şeklinde bana göster ki ekranın doğru okunup okunmadığını görebileyim.\n"
+        f"6. Tıpkı gelişmiş bir yapay zeka asistanı / kıdemli bir mentor gibi KESİNLİKLE Türkçe dilinde yanıt ver."
+    )
+    
+    # Geçmişi bağlama dahil et ki model conversation context'ini bilsin
+    logic_messages = [{"role": "system", "content": HERMES_SYSTEM_PROMPT}]
+    if chat_history:
+        optimized_history = optimize_chat_history(chat_history)
+        logic_messages.extend(optimized_history)
+        
+    # Eğer user input geçmişe zaten eklenmişse (örneğin UI tarafından), son mesajı logic_prompt ile değiştir.
+    if logic_messages and logic_messages[-1].get("role") == "user" and logic_messages[-1].get("content") == user_input:
+        logic_messages[-1]["content"] = logic_prompt
+    else:
+        logic_messages.append({"role": "user", "content": logic_prompt})
+    
+    try:
+        response = requests.post(
+            f"{OLLAMA_URL}/chat",
+            json={
+                "model": RESPONDER_MODEL,
+                "messages": logic_messages,
+                "stream": False,
+                "options": {
+                    "temperature": 0.2,
+                    "num_ctx": 4096,
+                },
+            },
+            timeout=60,
+        )
+        
+        if response.status_code == 200:
+            payload = response.json()
+            reply = sanitize_assistant_text(payload.get("message", {}).get("content", ""))
+            return {"ok": True, "reply": reply or "Görüntü analiz edildi ve soru çözüldü.", "error": ""}
+        else:
+            return {"ok": False, "reply": "", "error": f"Hermes modeline erişilemedi. Durum kodu: {response.status_code}"}
+            
+    except Exception as e:
+        return {"ok": False, "reply": "", "error": f"Çözümleme aşamasında hata: {e}"}

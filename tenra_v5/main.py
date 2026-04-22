@@ -150,6 +150,28 @@ class ClickableLabel(QLabel):
         if event.button() == Qt.LeftButton:
             self.clicked.emit()
         super().mousePressEvent(event)
+
+# ═══════════════════════════════════════════════
+# SIMPLE ACTION WORKER THREAD
+# ═══════════════════════════════════════════════
+class SimpleActionWorker(QThread):
+    """Kisa I/O islemlerini arkaplanda calistirir (UI donmasin diye)."""
+    action_finished = Signal(str, str) # func_name, message
+    
+    def __init__(self, action_type, executor, params):
+        super().__init__()
+        self.action_type = action_type
+        self.executor = executor
+        self.params = params
+        
+    def run(self):
+        try:
+            if self.action_type == "delete":
+                result = self.executor.execute("move_to_trash", self.params)
+                msg = result.get("message", "İşlem tamamlandı.")
+                self.action_finished.emit("move_to_trash", msg)
+        except Exception as e:
+            self.action_finished.emit("Hata", str(e))
 # ═══════════════════════════════════════════════
 # LLM WORKER THREAD
 # ═══════════════════════════════════════════════
@@ -164,8 +186,7 @@ class LLMWorker(QThread):
         super().__init__()
         self.rpa_mode = rpa_mode
         self.user_input = user_input
-        if self.rpa_mode:
-            self.user_input = "[SISTEM NOTU: SU AN OTONOM RPA MODUNDASIN. Kullanicinin bilgisayarini kontrol etmek icin 'click_screen', 'type_text', 'press_hotkey' araclarini dogrudan kullanarak fare ve klavyeyi yonet!] " + self.user_input
+        self.raw_user_input = user_input
         
         self.screenshot_path = screenshot_path
         self.chat_history = chat_history or []
@@ -192,6 +213,63 @@ class LLMWorker(QThread):
             return name_match.group(1).strip()
         return ""
 
+    def _extract_delete_target(self, text: str) -> str:
+        text = text.strip()
+        patterns = [
+            r"(?:masaustunde|masaüstünde)\s+(.+?)\s+(?:dosyasini|dosyasını|dosyayi|dosyayı|klasoru|klasörü|klasor|klasör)?\s*sil",
+            r"(?:desktopta|desktop'ta)\s+(.+?)\s+(?:dosyasini|dosyasını|dosyayi|dosyayı|klasoru|klasörü|klasor|klasör)?\s*sil",
+            r"(.+?)\s+(?:dosyasini|dosyasını|dosyayi|dosyayı|klasoru|klasörü|klasor|klasör)?\s*sil$",
+        ]
+
+        for pattern in patterns:
+            match = re.search(pattern, text, flags=re.IGNORECASE)
+            if match:
+                value = match.group(1).strip(" .,:;")
+                value = re.sub(r"^(bir|su|şu|o)\s+", "", value, flags=re.IGNORECASE)
+                if value:
+                    return value
+        return ""
+
+    def _extract_google_query(self, text: str) -> str:
+        lower = text.lower()
+        quoted = self._extract_quoted_name(text)
+        if quoted:
+            return quoted
+
+        # "muz hakkinda ..." kalibi
+        split_token = "hakkında" if "hakkında" in lower else ("hakkinda" if "hakkinda" in lower else "")
+        if split_token:
+            left = lower.split(split_token)[0]
+            tokens = re.findall(r"[a-z0-9çğıöşü]+", left)
+            stop_words = {
+                "yeni", "bir", "google", "sayfasi", "sayfası", "sayfa", "ac", "aç", "acip", "açıp",
+                "web", "ve", "ile", "icin", "için", "hakkinda", "hakkında",
+            }
+            filtered = [t for t in tokens if t not in stop_words]
+            if filtered:
+                return " ".join(filtered[-4:]).strip()
+
+        # "google'da x ara" kalibi
+        search_match = re.search(r"(?:google'da|googleda|ara|search)\s*[:\-]?\s*(.+)", lower, flags=re.IGNORECASE)
+        if search_match:
+            candidate = search_match.group(1)
+            candidate = re.sub(r"\b(aç|ac|açıp|acip|sayfa|sayfasi|sayfası)\b", "", candidate, flags=re.IGNORECASE)
+            candidate = re.sub(r"\s+", " ", candidate).strip(" .,:;")
+            if candidate:
+                return candidate
+
+        return ""
+
+    def _is_action_intent(self, text: str) -> bool:
+        import re
+        lower = text.lower()
+        action_tokens = (
+            "ac", "aç", "sil", "olustur", "oluştur", "yarat", "ara", "calistir", "çalıştır",
+            "tikla", "tıkla", "tasi", "taşı", "kopyala", "yaz", "guncelle", "güncelle",
+        )
+        words = re.findall(r'\b\w+\b', lower)
+        return any(token in words for token in action_tokens)
+
     def _looks_like_manual_instructions(self, text: str) -> bool:
         lowered = text.lower()
         manual_tokens = (
@@ -207,14 +285,23 @@ class LLMWorker(QThread):
         return any(token in lowered for token in manual_tokens)
 
     def _run_direct_shortcut(self, executor):
-        lower = self.user_input.lower()
-        text = self.user_input.strip()
+        lower = self.raw_user_input.lower()
+        text = self.raw_user_input.strip()
 
         if "masa" in lower and "liste" in lower:
             return "list_desktop", executor.execute("list_desktop", {})
 
-        if "sistem" in lower and ("durum" in lower or "bilgi" in lower or "ozet" in lower):
+        if "sistem" in lower and re.search(r"\b(durum|bilgi|ozet|özet)\b", lower):
             return "get_system_info", executor.execute("get_system_info", {})
+
+        if "google" in lower and any(word in lower for word in ("ac", "aç", "open")):
+            from urllib.parse import quote_plus
+
+            query = self._extract_google_query(text)
+            if query:
+                search_url = f"https://www.google.com/search?q={quote_plus(query)}"
+                return "open_url", executor.execute("open_url", {"url": search_url})
+            return "open_url", executor.execute("open_url", {"url": "https://www.google.com"})
 
         if "ara" in lower and ("web" in lower or "google" in lower):
             query = text
@@ -254,9 +341,9 @@ class LLMWorker(QThread):
                 return "run_command", executor.execute("run_command", {"command": raw_cmd})
 
         if "sil" in lower and ("dosya" in lower or "klasor" in lower or "klasör" in lower):
-            target = self._extract_quoted_name(text)
+            target = self._extract_quoted_name(text) or self._extract_delete_target(text)
             if target:
-                return "move_to_trash", executor.execute("move_to_trash", {"path": target})
+                return "confirm_delete", {"success": True, "message": target}
 
         if any(word in lower for word in ("ac", "aç", "başlat", "baslat")) and "uygulama" in lower:
             app_name = self._extract_quoted_name(text)
@@ -280,7 +367,7 @@ class LLMWorker(QThread):
 
             # Screenshot analysis mode
             if should_analyze_screenshot(self.user_input, self.screenshot_path):
-                vision_result = analyze_screenshot_question(self.user_input, self.screenshot_path)
+                vision_result = analyze_screenshot_question(self.user_input, self.screenshot_path, chat_history=self.chat_history)
                 if vision_result.get("ok"):
                     self.response_ready.emit(vision_result.get("reply", "Görüntü analiz edildi."), "")
                 else:
@@ -294,13 +381,32 @@ class LLMWorker(QThread):
             shortcut = self._run_direct_shortcut(executor)
             if shortcut:
                 shortcut_name, shortcut_result = shortcut
+                if shortcut_name == "confirm_delete":
+                    target = shortcut_result.get("message", "")
+                    if target:
+                        self.response_ready.emit(f"__CONFIRM_DELETE__{target}", "")
+                    else:
+                        self.response_ready.emit("Silinecek hedef anlasilamadi.", "")
+                    return
                 msg = shortcut_result.get("message", "İşlem tamamlandı.")
                 self.tool_executed.emit(shortcut_name, msg)
                 self.response_ready.emit(msg, shortcut_name)
                 return
 
+            # Lightweight yes/no confirmation for pending dangerous actions
+            if self._is_action_intent(self.raw_user_input):
+                self.response_ready.emit(
+                    "Komut icin once dogrudan arac denendi ama uygun eylem bulunamadi. "
+                    "Lutfen tek cümlede hedefi net yazin. Ornek: masaustunde 'hermes denem v2' dosyasini sil.",
+                    "",
+                )
+                return
+
+            # Pass input directly without confusing system injections
+            input_text = self.user_input
+
             # Full Hermes tool-calling agent loop
-            agent_result = run_hermes_tool_loop(self.user_input, executor, chat_history=self.chat_history)
+            agent_result = run_hermes_tool_loop(input_text, executor, chat_history=self.chat_history)
             if not agent_result.get("ok"):
                 error_msg = agent_result.get("error", "Bilinmeyen hata")
                 self.response_ready.emit(f"⚠ {error_msg}", "")
@@ -323,7 +429,19 @@ class LLMWorker(QThread):
             if tool_results and (not reply or self._looks_like_manual_instructions(reply)):
                 last_tool_name = tool_results[-1].get("name", "")
                 last_msg = tool_results[-1].get("result", {}).get("message", "")
-                if last_msg and last_tool_name != "get_system_info":
+                for tool_call in tool_results:
+                    if tool_call.get("name") in {"move_to_trash", "delete_file"}:
+                        self._pending_action = None
+                        break
+                is_info_only = all(
+                    (tool_call.get("name") == "get_system_info") for tool_call in tool_results
+                )
+                if is_info_only and self._is_action_intent(self.raw_user_input):
+                    reply = (
+                        "Bu istek bir eylem komutu ama model sadece sistem ozeti istedi. "
+                        "Komutu daha net verin: ornek 'masaustunde hermes denem v2 dosyasini sil'."
+                    )
+                elif last_msg and last_tool_name != "get_system_info":
                     reply = last_msg
                 elif not reply:
                     reply = "İşlem arka planda tamamlandı."
@@ -346,6 +464,7 @@ class ChatWindow(QMainWindow):
         super().__init__()
         self.chat_history = []
         self.rpa_mode = False
+        self._pending_action = None
         self.setWindowTitle("Tenra")
         self.setMinimumSize(480, 650)
         self.resize(500, 700)
@@ -376,7 +495,7 @@ class ChatWindow(QMainWindow):
         self.container = QFrame()
         self.container.setStyleSheet(f"""
             QFrame {{
-                background: rgba(12, 12, 18, 245);
+                background: rgba(24, 26, 32, 245);
                 border: 1px solid rgba(255,255,255,0.08);
                 border-radius: 16px;
             }}
@@ -395,26 +514,26 @@ class ChatWindow(QMainWindow):
         
         # Logo + isim
         logo_label = QLabel("T")
-        logo_label.setFont(QFont("Consolas", 18, QFont.Bold))
-        logo_label.setStyleSheet(f"color: {Colors.ACCENT.name()}; background: transparent;")
+        logo_label.setFont(QFont("Segoe UI", 18, QFont.ExtraBold))
+        logo_label.setStyleSheet(f"QLabel {{ color: {Colors.ACCENT.name()}; background: transparent; border: none; padding: 0; margin: 0; }}")
         logo_label.setFixedWidth(30)
         
         title_label = QLabel("TENRA")
         title_label.setFont(QFont("Segoe UI", 13, QFont.Bold))
-        title_label.setStyleSheet(f"color: {Colors.TEXT.name()}; background: transparent;")
+        title_label.setStyleSheet(f"QLabel {{ color: {Colors.TEXT.name()}; background: transparent; border: none; padding: 0; margin: 0; }}")
         
         version_label = QLabel("v5")
-        version_label.setFont(QFont("Segoe UI", 9))
-        version_label.setStyleSheet(f"color: {Colors.TEXT_MUTED.name()}; background: transparent;")
+        version_label.setFont(QFont("Segoe UI", 9, QFont.Light))
+        version_label.setStyleSheet(f"QLabel {{ color: {Colors.TEXT_MUTED.name()}; background: transparent; border: none; padding: 0; margin-top: 4px; }}")
         
         # Status dot
         self.status_dot = QLabel("●")
         self.status_dot.setFont(QFont("Segoe UI", 8))
-        self.status_dot.setStyleSheet(f"color: {Colors.ACCENT.name()}; background: transparent;")
+        self.status_dot.setStyleSheet(f"QLabel {{ color: {Colors.ACCENT.name()}; background: transparent; border: none; padding: 0; margin: 0; }}")
         
         status_text = QLabel("Aktif")
         status_text.setFont(QFont("Segoe UI", 9))
-        status_text.setStyleSheet(f"color: {Colors.TEXT_MUTED.name()}; background: transparent;")
+        status_text.setStyleSheet(f"QLabel {{ color: {Colors.TEXT_MUTED.name()}; background: transparent; border: none; padding: 0; margin: 0; }}")
         
         # Kapat butonu
         close_btn = QPushButton("✕")
@@ -510,7 +629,7 @@ class ChatWindow(QMainWindow):
         self.capture_btn.clicked.connect(self._capture_screenshot)
         
         self.attach_btn = QPushButton("📎")
-        self.attach_btn.setFixedSize(42, 38)
+        self.attach_btn.setFixedSize(38, 38)
         self.attach_btn.setToolTip("Bilgisayardan fotoğraf yükle")
         self.attach_btn.setFont(QFont("Segoe UI", 12))
         self.attach_btn.setStyleSheet("""
@@ -518,14 +637,14 @@ class ChatWindow(QMainWindow):
                 background: rgba(255, 255, 255, 0.05);
                 color: #aaa;
                 border: 1px solid rgba(255, 255, 255, 0.1);
-                border-radius: 10px;
+                border-radius: 19px;
             }
-            QPushButton:hover { background: rgba(255, 255, 255, 0.1); }
+            QPushButton:hover { background: rgba(255, 255, 255, 0.12); color: #fff; }
         """)
         self.attach_btn.clicked.connect(self._select_image)
         
         self.rpa_btn = QPushButton("🤖")
-        self.rpa_btn.setFixedSize(42, 38)
+        self.rpa_btn.setFixedSize(38, 38)
         self.rpa_btn.setToolTip("Otonom Mod (RPA) — Farenizi ve klavyenizi kullanarak bilgisayari kontrol eder")
         self.rpa_btn.setFont(QFont("Segoe UI", 14))
         self.rpa_btn.setCheckable(True)
@@ -534,26 +653,27 @@ class ChatWindow(QMainWindow):
                 background: rgba(255, 255, 255, 0.05);
                 color: #aaa;
                 border: 1px solid rgba(255, 255, 255, 0.1);
-                border-radius: 10px;
+                border-radius: 19px;
             }
-            QPushButton:hover { background: rgba(255, 255, 255, 0.1); }
+            QPushButton:hover { background: rgba(255, 255, 255, 0.12); color: #fff; }
             QPushButton:disabled { background: #2f3a3f; color: #778; border-color: #445; }
         """)
         self.rpa_btn.clicked.connect(self._toggle_rpa_mode)
         
         self.input_field = QLineEdit()
         self.input_field.setPlaceholderText("Ne yapayım?")
-        self.input_field.setFont(QFont("Segoe UI", 10))
+        self.input_field.setFont(QFont("Segoe UI", 11))
         self.input_field.setStyleSheet(f"""
             QLineEdit {{
-                background: rgba(255,255,255,0.04);
-                border: 1px solid rgba(255,255,255,0.08);
-                border-radius: 10px;
-                padding: 10px 14px;
+                background: rgba(255,255,255,0.06);
+                border: 1px solid rgba(255,255,255,0.1);
+                border-radius: 18px;
+                padding: 10px 18px;
                 color: {Colors.TEXT.name()};
             }}
             QLineEdit:focus {{
-                border-color: rgba(94, 235, 216, 0.3);
+                background: rgba(255,255,255,0.08);
+                border-color: rgba(94, 235, 216, 0.4);
             }}
         """)
         self.input_field.returnPressed.connect(self._send_message)
@@ -566,7 +686,7 @@ class ChatWindow(QMainWindow):
                 background: {Colors.ACCENT.name()};
                 color: #000;
                 border: none;
-                border-radius: 10px;
+                border-radius: 19px;
                 font-weight: bold;
             }}
             QPushButton:hover {{
@@ -624,25 +744,33 @@ class ChatWindow(QMainWindow):
         
         if is_user:
             html = f"""
-            <table width="100%" cellspacing="0" cellpadding="0" style="margin-bottom: 12px;">
+            <table width="100%" cellspacing="0" cellpadding="0" style="margin-bottom: 14px;">
               <tr>
                 <td width="30%"></td>
                 <td align="right">
-                  <div style="background-color: #2a344a; color: #ffffff; padding: 10px 14px; border-radius: 12px; display: inline-block; text-align: left;">
-                    {display_text}
-                  </div>
+                  <table cellspacing="0" cellpadding="0" style="background-color: rgba(255, 255, 255, 0.1); border-radius: 16px; border-bottom-right-radius: 4px;">
+                    <tr>
+                      <td style="padding: 12px 18px; color: #ffffff; font-family: 'Segoe UI', Arial, sans-serif; font-size: 15px;">
+                        {display_text}
+                      </td>
+                    </tr>
+                  </table>
                 </td>
               </tr>
             </table>
             """
         elif is_tool:
             html = f"""
-            <table width="100%" cellspacing="0" cellpadding="0" style="margin-bottom: 10px;">
+            <table width="100%" cellspacing="0" cellpadding="0" style="margin-bottom: 12px;">
               <tr>
                 <td align="left">
-                  <div style="background-color: #1a2629; color: #4bd8c4; padding: 6px 12px; border-radius: 8px; display: inline-block; font-family: Consolas; font-size: 12px;">
-                    {display_text}
-                  </div>
+                  <table cellspacing="0" cellpadding="0" style="background-color: rgba(20, 30, 35, 0.6); border-radius: 12px;">
+                    <tr>
+                      <td style="border-left: 3px solid #5eeef5; padding: 8px 14px; color: #5eeef5; font-family: Consolas, monospace; font-size: 13px;">
+                        {display_text}
+                      </td>
+                    </tr>
+                  </table>
                 </td>
                 <td width="30%"></td>
               </tr>
@@ -650,14 +778,18 @@ class ChatWindow(QMainWindow):
             """
         else:
             html = f"""
-            <table width="100%" cellspacing="0" cellpadding="0" style="margin-bottom: 12px;">
+            <table width="100%" cellspacing="0" cellpadding="0" style="margin-bottom: 16px;">
               <tr>
                 <td align="left">
-                  <div style="background-color: #202028; color: #e0e0e0; padding: 10px 14px; border-radius: 12px; display: inline-block;">
-                    {display_text}
-                  </div>
+                  <table cellspacing="0" cellpadding="0" style="background-color: rgba(30, 35, 40, 0.85); border-radius: 16px; border-bottom-left-radius: 4px;">
+                    <tr>
+                      <td style="padding: 14px 20px; color: #e6e6e6; font-family: 'Segoe UI', Arial, sans-serif; font-size: 15px;">
+                        {display_text}
+                      </td>
+                    </tr>
+                  </table>
                 </td>
-                <td width="30%"></td>
+                <td width="20%"></td>
               </tr>
             </table>
             """
@@ -695,7 +827,15 @@ class ChatWindow(QMainWindow):
                     border-radius: 10px;
                 }
             """)
-            self._add_message("🤖 <b>Otonom Mod (RPA) Aktif:</b> Tenra artik mouse ve klavyenizi kullanarak bilgisayari kontrol edebilir.", is_tool=True)
+            self._add_message(
+                "🤖 <b>Otonom Mod (Smart Vision RPA) Aktif:</b> Tenra artik mouse ve klavyenizi kullanarak bilgisayari kontrol edebilir.<br><br>"
+                "<i style='color: #888; font-size: 11px;'>Sistem Notu: Model, koordinat tahmin etmek yerine doğrudan okuduğu metne (click_text_on_screen) tıklayacak şekilde Akıllı OCR moduna geçirildi.</i>", 
+                is_tool=True
+            )
+            self._add_message(
+                "Otonom mod acildi. Guvenli calisma icin yikici komutlarda onay penceresi gosterilecektir.",
+                is_tool=True,
+            )
             self.input_field.setPlaceholderText("Otonom Mod'da ne yapayım?")
         else:
             self.rpa_btn.setStyleSheet("""
@@ -757,7 +897,7 @@ class ChatWindow(QMainWindow):
         if url_str == "action://approve_tool":
             if hasattr(self, "_worker") and self._worker and self._worker.isRunning():
                 self._worker.tool_approval_result = True
-                self._add_message("✅ İşlem onaylandı, çalıştırılıyor...", is_tool=True)
+                self._add_message("Islem onaylandi, calistiriliyor...", is_tool=True)
                 self.typing_label.setText("Tenra düşünüyor")
                 self.typing_timer.start(500)
             return
@@ -765,9 +905,17 @@ class ChatWindow(QMainWindow):
         if url_str == "action://deny_tool":
             if hasattr(self, "_worker") and self._worker and self._worker.isRunning():
                 self._worker.tool_approval_result = False
-                self._add_message("❌ İşlem reddedildi.", is_tool=True)
+                self._add_message("Islem reddedildi.", is_tool=True)
                 self.typing_label.setText("İşlem iptal edildi.")
                 QTimer.singleShot(2000, self.typing_label.hide)
+            return
+
+        if url_str == "action://approve_pending":
+            self._handle_pending_confirmation(True)
+            return
+
+        if url_str == "action://deny_pending":
+            self._handle_pending_confirmation(False)
             return
 
         url_obj = QUrl(url_str)
@@ -779,7 +927,7 @@ class ChatWindow(QMainWindow):
 
     def _on_tool_approval_requested(self, func_name: str, params_str: str):
         self.typing_timer.stop()
-        self.typing_label.setText("⚠️ Kullanıcı onayı bekleniyor...")
+        self.typing_label.setText("Kullanici onayi bekleniyor...")
         html = f"""
         <table width="100%" cellspacing="0" cellpadding="0" style="margin-bottom: 12px;">
           <tr><td align="left">
@@ -796,6 +944,34 @@ class ChatWindow(QMainWindow):
         QTimer.singleShot(50, lambda: self.chat_display.verticalScrollBar().setValue(
             self.chat_display.verticalScrollBar().maximum()
         ))
+
+    def _handle_pending_confirmation(self, approved: bool):
+        pending = getattr(self, "_pending_action", None)
+        if not pending:
+            self._add_message("Onay bekleyen bir islem yok.", is_tool=True)
+            return
+
+        if not approved:
+            self._pending_action = None
+            self._add_message("Islem iptal edildi.", is_tool=True)
+            return
+
+        action_type = pending.get("type")
+        executor = pending.get("executor")
+        params = pending.get("params", {})
+        self._pending_action = None
+
+        if action_type == "delete" and executor:
+            self._add_message("İşlem başlatıldı, arka planda aranıyor...", is_tool=True)
+            self._action_worker = SimpleActionWorker(action_type, executor, params)
+            self._action_worker.action_finished.connect(self._on_simple_action_finished)
+            self._action_worker.start()
+            return
+
+        self._add_message("Bekleyen islem formati gecersiz.", is_tool=True)
+        
+    def _on_simple_action_finished(self, func_name: str, message: str):
+        self._add_message(f"⚡ <b>{func_name}</b> — {message}", is_tool=True)
         
     def _open_preview_image(self):
         if self.latest_screenshot_path:
@@ -808,17 +984,50 @@ class ChatWindow(QMainWindow):
         self.latest_screenshot_path = None
         self.preview_frame.hide()
         self.input_field.setFocus()
+
+    def _request_delete_confirmation(self, target: str, executor):
+        safe_target = target.replace("<", "&lt;").replace(">", "&gt;")
+        self._pending_action = {
+            "type": "delete",
+            "executor": executor,
+            "params": {"path": target},
+        }
+        self._add_message(
+            (
+                f"Masaüstünde '<b>{safe_target}</b>' hedefini çöp kutusuna taşımak istiyorum. "
+                "Onaylıyor musun?<br/><br/>"
+                "<a href='action://approve_pending' style='color:#4bd8c4; text-decoration:none; font-weight:bold; font-size:14px;'>✅ EVET</a>"
+                "&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;"
+                "<a href='action://deny_pending' style='color:#ff6666; text-decoration:none; font-weight:bold; font-size:14px;'>❌ HAYIR</a>"
+            ),
+            is_tool=True,
+        )
     
     def _send_message(self):
         text = self.input_field.text().strip()
         if not text and not self.latest_screenshot_path:
+            return
+
+        # Handle simple yes/no confirmations before starting worker
+        normalized = text.lower().strip()
+        if normalized in {"evet", "eet", "evt", "yes", "onay", "tamam"} and self._pending_action:
+            self._add_message(text, is_user=True)
+            self._handle_pending_confirmation(True)
+            self.input_field.clear()
+            self.input_field.setFocus()
+            return
+        if normalized in {"hayir", "hayır", "iptal", "vazgec", "vazgeç", "no"} and self._pending_action:
+            self._add_message(text, is_user=True)
+            self._handle_pending_confirmation(False)
+            self.input_field.clear()
+            self.input_field.setFocus()
             return
         
         display_html = text
         if self.latest_screenshot_path:
             # Resim eklentisini mesaja görsel olarak dahil et ve tiklanabilir yap
             img_uri = f"file:///{self.latest_screenshot_path.replace(chr(92), '/')}"
-            img_html = f"<a href='{img_uri}'><img src='{self.latest_screenshot_path}' width='260' style='border-radius:10px;'></a><br><br>"
+            img_html = f"<a href='{img_uri}'><img src='{img_uri}' width='260' style='border-radius:10px;'></a><br><br>"
             display_html = img_html + text
             
         self._add_message(display_html, is_user=True)
@@ -828,7 +1037,7 @@ class ChatWindow(QMainWindow):
         self.capture_btn.setEnabled(False)
         self.rpa_btn.setEnabled(False)
         self.preview_close_btn.setEnabled(False)
-        self.status_dot.setStyleSheet("color: #ff6644; background: transparent;")
+        self.status_dot.setStyleSheet("QLabel { color: #ff6644; background: transparent; border: none; }")
         
         # Hafizaya (Memory) mesaji ekle
         self.chat_history.append({"role": "user", "content": text})
@@ -847,6 +1056,7 @@ class ChatWindow(QMainWindow):
         
         # Gonderildikten sonra attachmenti temizle
         self.preview_frame.hide()
+        self.latest_screenshot_path = None
     
     def _on_tool_executed(self, func_name: str, result: str):
         self._add_message(f"⚡ <b>{func_name}</b> — {result}", is_tool=True)
@@ -861,6 +1071,8 @@ class ChatWindow(QMainWindow):
             "search_files": "Dosyaları tarıyor",
             "run_command": "Sistem komutu çalıştırıyor",
             "click_screen": "Ekrana tıklıyor",
+            "click_text_on_screen": "Ekrandaki metne tıklıyor",
+            "click_element_by_image": "Görsel öğeye tıklıyor",
             "type_text": "Klavyeden yazıyor",
             "list_directory": "Klasörü inceliyor",
             "open_app": "Uygulama açıyor"
@@ -871,6 +1083,41 @@ class ChatWindow(QMainWindow):
     def _on_response(self, message: str, func_info: str):
         self.typing_timer.stop()
         self.typing_label.hide()
+
+        if isinstance(message, str) and message.startswith("__CONFIRM_DELETE__"):
+            target = message.replace("__CONFIRM_DELETE__", "", 1)
+            from core.function_executor import executor
+            self._request_delete_confirmation(target, executor)
+            self.input_field.setEnabled(True)
+            self.send_btn.setEnabled(True)
+            self.capture_btn.setEnabled(True)
+            self.rpa_btn.setEnabled(True)
+            self.preview_close_btn.setEnabled(True)
+            self.input_field.setFocus()
+            self.status_dot.setStyleSheet(f"QLabel {{ color: {Colors.ACCENT.name()}; background: transparent; border: none; }}")
+            return
+
+        if isinstance(message, str) and message == "action://approve_pending":
+            self._handle_pending_confirmation(True)
+            self.input_field.setEnabled(True)
+            self.send_btn.setEnabled(True)
+            self.capture_btn.setEnabled(True)
+            self.rpa_btn.setEnabled(True)
+            self.preview_close_btn.setEnabled(True)
+            self.input_field.setFocus()
+            self.status_dot.setStyleSheet(f"QLabel {{ color: {Colors.ACCENT.name()}; background: transparent; border: none; }}")
+            return
+
+        if isinstance(message, str) and message == "action://deny_pending":
+            self._handle_pending_confirmation(False)
+            self.input_field.setEnabled(True)
+            self.send_btn.setEnabled(True)
+            self.capture_btn.setEnabled(True)
+            self.rpa_btn.setEnabled(True)
+            self.preview_close_btn.setEnabled(True)
+            self.input_field.setFocus()
+            self.status_dot.setStyleSheet(f"QLabel {{ color: {Colors.ACCENT.name()}; background: transparent; border: none; }}")
+            return
         
         # Hafizaya (Memory) cevabi ekle
         self.chat_history.append({"role": "assistant", "content": message})
@@ -883,7 +1130,7 @@ class ChatWindow(QMainWindow):
         self.preview_close_btn.setEnabled(True)
         self.latest_screenshot_path = None # islem bitince sifirla
         self.input_field.setFocus()
-        self.status_dot.setStyleSheet(f"color: {Colors.ACCENT.name()}; background: transparent;")
+        self.status_dot.setStyleSheet(f"QLabel {{ color: {Colors.ACCENT.name()}; background: transparent; border: none; }}")
     
     # Window dragging
     def mousePressEvent(self, event):
@@ -974,7 +1221,9 @@ def check_and_install_dependencies():
         "pyautogui": "pyautogui",
         "send2trash": "send2trash",
         "duckduckgo_search": "duckduckgo-search",
-        "bs4": "beautifulsoup4"
+        "bs4": "beautifulsoup4",
+        "PIL": "Pillow",
+        "pytesseract": "pytesseract"
     }
     
     missing = []
