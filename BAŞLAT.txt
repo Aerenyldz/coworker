@@ -1,4 +1,4 @@
-🎯 TENRA V5 — HIZLI BAŞLAT REHBERI
+🎯 TENRA V6 — HIZLI BAŞLAT REHBERI
 
 ════════════════════════════════════════════════════════════════
 
@@ -11,7 +11,7 @@ ADIM 1: ÖN KOŞUL (Sadece ilk defa)
 ✓ Ollama kurulu mu?
   → Eğer yoksa: https://ollama.ai adresinden indirin
   → Ardından terminalde çalıştırın: ollama serve
-  → Başka bir terminalde: ollama pull qwen2.5:7b
+  → Başka bir terminalde: ollama pull hermes3:8b
 
 ════════════════════════════════════════════════════════════════
 
@@ -19,7 +19,7 @@ ADIM 2: ÇÖP KALDIRMA (Zaten yapılmış)
 ════════════════════════════════════════════════════════════════
 
 ✓ Gereksiz dosyalar silindi
-✓ Sadece Tenra V5 kaldı
+✓ Sadece Tenra V6 kaldı
 ✓ Web kısmı kaldırıldı
 
 ════════════════════════════════════════════════════════════════
@@ -33,7 +33,7 @@ ADIM 3: ÇALIŞ!
   • Sanal ortam oluşturulacak
   • Paketler kurulacak
   • Sistem kontrol edilecek
-  • Tenra V5 başlatılacak
+  • Tenra V6 başlatılacak
 
 ════════════════════════════════════════════════════════════════
 
@@ -50,7 +50,7 @@ SORUN YAŞIYORSAN
    → Komut: pip install -r tenra_v5\requirements.txt
 
 3. "Model yüklenmiyor" hatası?
-   → Ollama'da model yükle: ollama pull qwen2.5:7b
+   → Ollama'da model yükle: ollama pull hermes3:8b
 
 4. Diğer sorunlar?
    → Terminalde çalıştır: python check_setup.py
@@ -62,7 +62,7 @@ AYARLAR
 ════════════════════════════════════════════════════════════════
 
 ✏️ Ayarları düzenlemek için: tenra_v5\config.py
-  • Modeli değiştir: RESPONDER_MODEL = "llama3:latest"
+  • Modeli değiştir: RESPONDER_MODEL = "hermes3:8b"
   • Ollama URL: OLLAMA_URL = "http://localhost:11434/api"
   • Özellikler: VOICE_ASSISTANT_ENABLED, TTS vb.
 

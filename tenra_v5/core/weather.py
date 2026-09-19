@@ -33,7 +33,7 @@ class WeatherManager:
                 "hourly": "temperature_2m,weather_code",
                 "temperature_unit": "fahrenheit",
                 "timezone": "auto",
-                "forecast_days": 1
+                "forecast_days": 2
             }
             
             response = requests.get(self.base_url, params=params, timeout=5)

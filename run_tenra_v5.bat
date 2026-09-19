@@ -1,12 +1,12 @@
 @echo off
 chcp 65001 >nul
-REM Tenra V5 — Başlatma dosyası
+REM Tenra V6 — Başlatma dosyası
 
 cd /d "%~dp0"
 
 echo.
 echo ════════════════════════════════════════════════
-echo   TENRA V5 — Masaüstü Asistan Başlatılıyor
+echo   TENRA V7 — Masaüstü Asistan Başlatılıyor
 echo ════════════════════════════════════════════════
 echo.
 
@@ -39,7 +39,7 @@ if errorlevel 1 (
 )
 
 echo.
-echo [+] Tenra V5 başlatılıyor...
+echo [+] Tenra V7 başlatılıyor...
 echo.
 
 python tenra_v5\main.py

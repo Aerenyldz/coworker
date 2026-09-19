@@ -49,14 +49,15 @@ class STTListener:
             else:
                 print(f"{YELLOW}[STT] ⚠ CUDA is not available, will use CPU{RESET}")
             
-            print(f"{CYAN}[STT] Initializing AudioToTextRecorder with device='cuda'...{RESET}")
+            recorder_device = "cuda" if cuda_available else "cpu"
+            print(f"{CYAN}[STT] Initializing AudioToTextRecorder with device='{recorder_device}'...{RESET}")
             
             # Initialize RealTimeSTT with built-in wake word detection
             # Using pvporcupine backend since "jarvis" is a predefined Porcupine wake word
             self.recorder = AudioToTextRecorder(
                 model=REALTIMESTT_MODEL,  # Use configured model (base, small, etc.)
                 language="en",
-                device="cuda",  # Use GPU for faster processing
+                device=recorder_device,
                 spinner=False,  # Disable spinner for cleaner output
                 wakeword_backend="pvporcupine",  # Use Porcupine for wake word detection
                 wake_words=WAKE_WORD,  # Built-in wake word detection

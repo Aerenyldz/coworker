@@ -1,4 +1,4 @@
-"""Hermes-focused tool-calling agent for Tenra V5.
+"""Hermes-focused tool-calling agent for Tenra V6.
 
 This module handles:
 - Building Ollama /api/chat requests with tool schemas
@@ -21,8 +21,10 @@ import requests
 from config import (
     HERMES_SYSTEM_PROMPT,
     MAX_TOOL_STEPS,
+    MAX_TOOL_STEPS_UNCENSORED,
     OLLAMA_URL,
     RESPONDER_MODEL,
+    UNCENSORED_SYSTEM_ADDENDUM,
     VISION_MODEL,
     VISION_SYSTEM_PROMPT,
     USE_LOCAL_ROUTER,
@@ -410,36 +412,6 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [
     {
         "type": "function",
         "function": {
-            "name": "click_screen",
-            "description": "PyAutoGUI kullanarak bilgisayar ekraninda spesifik bir x, y koordinatina farenin sol tusuyla tiklar.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "x": {"type": "integer", "description": "Tiklanacak x koordinati (pixel)."},
-                    "y": {"type": "integer", "description": "Tiklanacak y koordinati (pixel)."},
-                },
-                "required": ["x", "y"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "type_text",
-            "description": "Klavyeden hizli bir sekilde metin yazar ve opsiyonel olarak Enter tusuna basar.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "text": {"type": "string", "description": "Yazilacak metin."},
-                    "press_enter": {"type": "boolean", "description": "Metni yazdiktan sonra Enter'a basilsin mi?"},
-                },
-                "required": ["text"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
             "name": "press_hotkey",
             "description": "Klavye kisayolu gonderir (Orn: ['ctrl', 'c'] veya ['win', 'd']). Pencereleri kapatmak (alt+f4) veya sekmeleri yonetmek icin kullan.",
             "parameters": {
@@ -727,26 +699,56 @@ def optimize_chat_history(history: List[Dict[str, Any]]) -> List[Dict[str, Any]]
     return optimized[-limit:]
 
 
+def is_informational_or_analysis_query(text: str) -> bool:
+    """Kullanıcının isteğinin bir sistem eylemi mi yoksa bilgi/analiz/öğrenme sorusu mu olduğunu belirler."""
+    if not text:
+        return True
+    lowered = text.lower().strip()
+
+    # Soru, öğrenme ve analiz kalıpları (örneğin: nasıl calarım, nedir, açıkla, analiz et)
+    question_patterns = [
+        r'\bnas[iı]\s*l\b',
+        r'\bnedir\b',
+        r'\bne demek\b',
+        r'\bne [iı][sş]e yarar\b',
+        r'\bneden\b',
+        r'\bni[cç]in\b',
+        r'\bniye\b',
+        r'\bkimdir\b',
+        r'\ba[cç][iı]kla\b',
+        r'\banlat\b',
+        r'\banaliz et\b',
+        r'\by[oö]ntemleri\b',
+        r'\bbilgi ver\b',
+        r'\bfark[iı] ne\b',
+        r'\bhangisi\b',
+        r'\b[oö][gğ]ret\b',
+        r'\btavsiye\b',
+        r'\b[oö]ner\b'
+    ]
+    is_q = any(re.search(pat, lowered) for pat in question_patterns) or lowered.endswith('?')
+
+    # Doğrudan işletim sistemi eylemi ve emir kalıpları
+    action_patterns = [
+        r'\b(uygulamas[iı]n[iı]|program[iı]n[iı]|app)\s+(a[cç]|ba[sş]lat)\b',
+        r'^(a[cç]|ba[sş]lat|calistir|çalıştır|sil|yarat|olu[sş]tur)\b',
+        r'\b(a[cç]|ba[sş]lat|calistir|çalıştır|sil|yarat|olu[sş]tur)$',
+        r'\bkomut:\b',
+        r'\bpowershell:\b',
+        r'\bterminal:\b',
+    ]
+    is_act = any(re.search(pat, lowered) for pat in action_patterns)
+
+    # Soru/analiz ise ve doğrudan sistem eylemi emredilmemişse salt analizdir (araç gerekmez)
+    return is_q and not is_act
+
+
 # ═══════════════════════════════════════════════
 # MAIN TOOL LOOP
 # ═══════════════════════════════════════════════
 
-def run_hermes_tool_loop(user_input: str, executor: Any, chat_history: list = None) -> Dict[str, Any]:
-    """Run a Hermes tool-calling loop.
-
-    1. Optionally try local FunctionGemma router first (if USE_LOCAL_ROUTER=True)
-    2. If no local match, use Ollama /api/chat with native tool calling
-    3. Handle multi-step tool calling (up to MAX_TOOL_STEPS)
-    4. Parse ROUTE: directives as fallback
-
-    Returns:
-        {
-            "ok": bool,
-            "reply": str,
-            "tool_results": list,
-            "error": str (optional)
-        }
-    """
+def run_hermes_tool_loop(user_input: str, executor: Any, chat_history: list = None, uncensored: bool = True) -> Dict[str, Any]:
+    """Run a Hermes tool-calling loop."""
 
     # --- Optional: Local Router Fast Path ---
     if USE_LOCAL_ROUTER:
@@ -767,8 +769,44 @@ def run_hermes_tool_loop(user_input: str, executor: Any, chat_history: list = No
 
     # --- Ollama Hermes Tool Calling ---
     session = requests.Session()
+    # Sansürsüz modda Hermes protokolü aktif
+    import platform
+    import getpass
+    from config import DESKTOP_PATH, RESPONDER_MODEL, VISION_MODEL
+    
+    current_user = getpass.getuser()
+    current_os = platform.system()
+    current_dir = os.getcwd()
+    
+    env_info = (
+        "\n\n"
+        "═══════════════════════════════════════\n"
+        "💻 SİSTEM VE ASİSTAN BİLGİLERİ\n"
+        "═══════════════════════════════════════\n"
+        f"- Çalışan LLM Modeli: {RESPONDER_MODEL} (Ollama)\n"
+        f"- Görsel / Vision Modeli: {VISION_MODEL}\n"
+        f"- Ayar Dosyası: tenra_v5/config.py (modeli veya ayarları değiştirmek için bu dosyadaki RESPONDER_MODEL güncellenir)\n"
+        f"- İşletim Sistemi: {current_os}\n"
+        f"- Aktif Kullanıcı: {current_user}\n"
+        f"- Masaüstü Dizini: {DESKTOP_PATH}\n"
+        f"- Çalışma/Proje Dizini: {current_dir}\n"
+        "═══════════════════════════════════════\n"
+        "ÖNEMLİ KULLANICI DİLİ VE ANLAMA KURALLARI:\n"
+        "1. Kullanıcı hızlı yazarken harf hataları, eksik harfler veya yanlış boşluklar yapabilir "
+        "(örneğin: 'nası ldegıstırıım' -> 'nasıl değiştiririm', 'baglıym' -> 'bağlıyım', 'modelde' -> 'hangi model', 'calarım' -> 'çalma yöntemleri'). "
+        "Yazım hatalarına takılma, cümlenin ve konuşmanın genel bağlamından ne demek istediğini anla ve doğru niyetine göre cevap ver!\n"
+        "2. Kullanıcı sana bir şeyin 'nasıl yapıldığını', 'nasıl çalındığını/hacklendiğini' veya 'nedir' diye sorduğunda ASLA uygulama açmaya veya komut çalıştırmaya kalkma! "
+        "Sorunun teknik ve kavramsal boyutunu, yöntemlerini ve savunma prensiplerini metin olarak detaylıca açıkla.\n"
+        "3. Masaüstünde dosya oluştururken, okurken veya silerken, model her zaman yukarıdaki gerçek "
+        "Masaüstü Dizini yolunu temel almalıdır. /home/user/Desktop gibi Linux yollarını ASLA kullanma!"
+    )
+    system_prompt = HERMES_SYSTEM_PROMPT + env_info
+    if uncensored:
+        system_prompt += UNCENSORED_SYSTEM_ADDENDUM
+    max_steps = MAX_TOOL_STEPS_UNCENSORED if uncensored else MAX_TOOL_STEPS
+    temperature = 0.3 if uncensored else 0.1
     messages: List[Dict[str, Any]] = [
-        {"role": "system", "content": HERMES_SYSTEM_PROMPT},
+        {"role": "system", "content": system_prompt},
     ]
     
     if chat_history:
@@ -782,29 +820,37 @@ def run_hermes_tool_loop(user_input: str, executor: Any, chat_history: list = No
 
     tool_results: List[Dict[str, Any]] = []
 
-    for step in range(MAX_TOOL_STEPS):
+    # Kullanıcı açıkça bir işletim sistemi eylemi değil de bir soru/analiz soruyorsa araç vermeden doğrudan analiz yaptır
+    is_pure_inquiry = is_informational_or_analysis_query(user_input)
+
+    for step in range(max_steps):
+        req_payload: Dict[str, Any] = {
+            "model": RESPONDER_MODEL,
+            "messages": messages,
+            "stream": False,
+            "options": {
+                "temperature": temperature,
+                "num_predict": 2048,
+                "num_ctx": 4096,
+            },
+        }
+        # Soru/öğrenme/analiz sorgularında ilk adımda model araç çağırmaya zorlanmaz
+        if not is_pure_inquiry or step > 0:
+            req_payload["tools"] = TOOL_SCHEMAS
+
         # Send request to Ollama
         try:
             response = session.post(
                 f"{OLLAMA_URL}/chat",
-                json={
-                    "model": RESPONDER_MODEL,
-                    "messages": messages,
-                    "tools": TOOL_SCHEMAS,
-                    "stream": False,
-                    "options": {
-                        "temperature": 0.1,
-                        "num_predict": 512,
-                    },
-                },
-                timeout=600,
+                json=req_payload,
+                timeout=120,
             )
         except requests.exceptions.ReadTimeout:
             return {
                 "ok": False,
                 "reply": "",
                 "tool_results": tool_results,
-                "error": "Ollama istek zaman aşımına uğradı (600sn Timeout). Cihazınız modeli çalıştırırken yavaş kalmış olabilir.",
+                "error": "Ollama istek zaman aşımına uğradı (120sn). Model yavaş yanıt veriyor — Ollama'nın GPU kullandığından emin olun.",
             }
         except requests.exceptions.ConnectionError:
             return {
@@ -839,43 +885,45 @@ def run_hermes_tool_loop(user_input: str, executor: Any, chat_history: list = No
 
         # --- Case 1: Model returned native tool_calls ---
         if extracted_calls:
-            # Add assistant message to history
-            messages.append({
-                "role": "assistant",
-                "content": message.get("content", ""),
-                "tool_calls": message.get("tool_calls", []),
-            })
+            for tc in extracted_calls:
+                fn_name = tc.get("name", "")
+                fn_args = tc.get("arguments", {})
 
-            for name, args, _raw in extracted_calls:
-                name = (name or "").strip()
-                args = _normalize_tool_args(name, args)
-
-                print(f"[Hermes] Executing: {name}({json.dumps(args, ensure_ascii=False)})")
-                result = executor.execute(name, args)
-                tool_results.append({"name": name, "args": args, "result": result})
-
-                # Add tool result to conversation
-                messages.append({
-                    "role": "tool",
-                    "name": name,
-                    "content": json.dumps(result, ensure_ascii=False),
+                fn_args = _normalize_tool_args(fn_name, fn_args)
+                result = executor.execute(fn_name, fn_args)
+                tool_results.append({
+                    "name": fn_name,
+                    "args": fn_args,
+                    "result": result,
                 })
 
-            # Continue loop — model may want to respond after seeing tool results
+                messages.append({
+                    "role": "tool",
+                    "name": fn_name,
+                    "content": json.dumps(result, ensure_ascii=False),
+                })
             continue
 
-        # --- Case 2: No tool calls — check for ROUTE: fallback ---
-        if assistant_text:
-            route_parsed = _parse_route_directive(assistant_text)
-            if route_parsed:
-                fn_name, parsed_args = route_parsed
-                parsed_args = _normalize_tool_args(fn_name, parsed_args)
+        # --- Case 2: Model output ROUTE: in text (fallback) ---
+        route_match = re.search(r"ROUTE:\s*(\w+)\((.*?)\)", assistant_text, re.DOTALL)
+        if route_match:
+            fn_name = route_match.group(1).strip()
+            raw_args = route_match.group(2).strip()
 
-                print(f"[Hermes] ROUTE fallback: {fn_name}({json.dumps(parsed_args, ensure_ascii=False)})")
-                result = executor.execute(fn_name, parsed_args)
-                tool_results.append({"name": fn_name, "args": parsed_args, "result": result})
+            try:
+                fn_args = json.loads(f"{{{raw_args}}}") if raw_args else {}
+            except Exception:
+                fn_args = {}
 
-                messages.append({"role": "assistant", "content": assistant_text})
+            if fn_name:
+                fn_args = _normalize_tool_args(fn_name, fn_args)
+                result = executor.execute(fn_name, fn_args)
+                tool_results.append({
+                    "name": fn_name,
+                    "args": fn_args,
+                    "result": result,
+                })
+
                 messages.append({
                     "role": "tool",
                     "name": fn_name,
@@ -924,68 +972,86 @@ def should_analyze_screenshot(user_input: str, screenshot_path: str | None) -> b
     return True
 
 
-def analyze_screenshot_question(user_input: str, screenshot_path: str, chat_history: list = None) -> Dict[str, Any]:
-    """Analyze a screenshot using a vision-capable model with an OCR fallback."""
+def get_screenshot_text(screenshot_path: str, user_input: str = "") -> str:
+    """Ekran görüntüsünden Vision API (moondream) kullanarak verileri ve metinleri çıkarır."""
     if not os.path.exists(screenshot_path):
-        return {"ok": False, "reply": "", "error": "Ekran görüntüsü dosyası bulunamadı."}
+        return ""
 
-    model_name = VISION_MODEL or RESPONDER_MODEL
+    model_name = VISION_MODEL or "moondream:latest"
     encoded_image = ""
     try:
         with open(screenshot_path, "rb") as image_file:
             encoded_image = base64.b64encode(image_file.read()).decode("ascii")
-    except Exception as e:
-        return {"ok": False, "reply": "", "error": f"Görsel okunamadı: {e}"}
+    except Exception:
+        return ""
 
     extracted_text = ""
 
-    # 1. Aşama: GÖZ (Vision API veya OCR) ile veriyi çıkar
-    try:
-        response = requests.post(
-            f"{OLLAMA_URL}/chat",
-            json={
-                "model": model_name,
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": VISION_SYSTEM_PROMPT,
-                    },
-                    {
-                        "role": "user",
-                        "content": "You are a strict OCR (Optical Character Recognition) engine. Your ONLY task is to extract ALL text, numbers, math formulas, and equations from the image VERBATIM. DO NOT describe the image. DO NOT write 'The image shows...'. Output EXACTLY the text found in the image, nothing else.",
-                        "images": [encoded_image],
-                    },
-                ],
-                "stream": False,
-                "options": {
-                    "temperature": 0.1,
-                    "num_ctx": 2048,
+    # 1. Aşama: Moondream veya Vision modeli ile generate endpoint üzerinden görseli tara
+    prompts_to_try = [
+        "Describe this image in detail.",
+        "Read the text in the image.",
+        "Transcribe all visible text, numbers, and labels in this image."
+    ]
+    
+    for prompt_text in prompts_to_try:
+        try:
+            resp = requests.post(
+                f"{OLLAMA_URL}/generate",
+                json={
+                    "model": model_name,
+                    "prompt": prompt_text,
+                    "images": [encoded_image],
+                    "stream": False,
+                    "options": {
+                        "temperature": 0.1,
+                        "num_predict": 1024,
+                    }
                 },
-            },
-            timeout=45,
-        )
+                timeout=60
+            )
+            if resp.status_code == 200:
+                out = sanitize_assistant_text(resp.json().get("response", "")).strip()
+                if out:
+                    extracted_text = out
+                    break
+        except Exception as e:
+            print(f"[Tenra Vision] Generate error with {model_name}: {e}")
 
-        if response.status_code == 200:
-            payload = response.json()
-            extracted_text = sanitize_assistant_text(payload.get("message", {}).get("content", ""))
-        else:
-            vision_error = f"Ollama HTTP {response.status_code}: {response.text[:200]}"
-            print(f"[Tenra Vision] {vision_error}")
-    except requests.exceptions.ReadTimeout:
-        vision_error = "Vision isteği zaman aşımına uğradı (45sn). Model yavaş kaldı."
-        print(f"[Tenra Vision] {vision_error}")
-    except Exception as e:
-        vision_error = f"Vision API Bağlantı Hatası: {e}"
-        print(f"[Tenra Vision] {vision_error}")
+    # 2. Aşama: Chat endpoint fallback
+    if not extracted_text:
+        try:
+            response = requests.post(
+                f"{OLLAMA_URL}/chat",
+                json={
+                    "model": model_name,
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": "Describe this image and read all visible text.",
+                            "images": [encoded_image],
+                        },
+                    ],
+                    "stream": False,
+                    "options": {
+                        "temperature": 0.1,
+                        "num_predict": 1024,
+                    },
+                },
+                timeout=60,
+            )
+            if response.status_code == 200:
+                payload = response.json()
+                extracted_text = sanitize_assistant_text(payload.get("message", {}).get("content", ""))
+        except Exception as e:
+            print(f"[Tenra Vision] Chat endpoint fallback error: {e}")
 
-    # Fallback: Eğer Vision modeli boş dönerse veya hata verirse
-    ocr_error = ""
+    # Fallback to Tesseract OCR
     if not extracted_text:
         try:
             from PIL import Image
             import pytesseract
             
-            # Windows tesseract_cmd path detection
             tesseract_paths = [
                 r"C:\Program Files\Tesseract-OCR\tesseract.exe",
                 r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
@@ -999,36 +1065,40 @@ def analyze_screenshot_question(user_input: str, screenshot_path: str, chat_hist
             img = Image.open(screenshot_path)
             try:
                 extracted_text = pytesseract.image_to_string(img, lang='eng+tur').strip()
-            except Exception as e:
-                # If language pack fails, try without lang argument
+            except Exception:
                 extracted_text = pytesseract.image_to_string(img).strip()
         except Exception as e:
-            ocr_error = str(e)
-            print(f"[Tenra Vision] OCR hatasi: {e}")
+            print(f"[Tenra Vision] OCR error: {e}")
             
+    return extracted_text
+
+
+def analyze_screenshot_question(user_input: str, screenshot_path: str, chat_history: list = None) -> Dict[str, Any]:
+    """Analyze a screenshot using a vision-capable model with an OCR fallback."""
+    if not os.path.exists(screenshot_path):
+        return {"ok": False, "reply": "", "error": "Ekran görüntüsü dosyası bulunamadı."}
+
+    extracted_text = get_screenshot_text(screenshot_path, user_input)
     if not extracted_text:
-        err_msg = "Görselden ne Vision modeli ne de OCR ile okunabilir bir metin/veri çıkarılamadı."
-        if vision_error:
-            err_msg += f"\nVision Modeli Hatası: {vision_error}"
-        if ocr_error:
-            err_msg += f"\nOCR Sistem Hatası: {ocr_error}"
-        return {"ok": False, "reply": "", "error": err_msg}
+        return {"ok": False, "reply": "", "error": "Görselden okunabilir bir metin/veri çıkarılamadı."}
 
     # 2. Aşama: BEYİN (RESPONDER_MODEL) ile mantığı kur ve soruyu çöz
     from config import HERMES_SYSTEM_PROMPT
+
+    # Kullanıcı soru sormamışsa (sadece ekran görüntüsü gönderdiyse) varsayılan prompt
+    effective_question = user_input.strip() if user_input and user_input.strip() else "Bu görselde ne var? Detaylı açıkla."
     
     logic_prompt = (
-        f"Göz (Vision) modülüm bu fotoğrafı okudu ve şu metinleri çıkardı:\n\n"
-        f"--- GÖRSEL METNİ ---\n{extracted_text}\n---------------------\n\n"
-        f"Sorum/İsteğim şu: '{user_input}'\n\n"
-        f"Lütfen yukarıdaki verileri kullanarak bana DOĞRUDAN cevap ver. 3. tekil şahıs dili KULLANMA. Benimle doğrudan, samimi ve öğretici bir dille konuş.\n\n"
-        f"ÖNEMLİ FORMAT KURALLARI:\n"
-        f"1. Eğer bu bir matematik/fizik problemiyse, önce eldeki verileri (verilenler) listele.\n"
-        f"2. Kullanacağın formülleri açıkça belirt ve mantığını adım adım açıkla.\n"
-        f"3. Matematiksel işlemleri teker teker göster (gerekirse Markdown formatında).\n"
-        f"4. Sonuçları birimleriyle (örn: µC, Volt, Joule) birlikte çok net bir şekilde vurgula.\n"
-        f"5. Cevabına başlarken (İlk satırda), Göz modelinin sana ilettiği GÖRSEL METNİ'ni kısaca '(Okunan Metin: [buraya yaz])' şeklinde bana göster ki ekranın doğru okunup okunmadığını görebileyim.\n"
-        f"6. Tıpkı gelişmiş bir yapay zeka asistanı / kıdemli bir mentor gibi KESİNLİKLE Türkçe dilinde yanıt ver."
+        f"Göz (Vision) modülüm bu fotoğrafı okudu ve şu metinleri/verileri çıkardı:\n\n"
+        f"━━━ GÖRSEL METNİ ━━━\n{extracted_text}\n━━━━━━━━━━━━━━━━━━━\n\n"
+        f"Kullanıcının sorusu/isteği: '{effective_question}'\n\n"
+        f"CEVAPLAMA KURALLARIN:\n"
+        f"1. İlk satırda '📷 Okunan: [görselden okunan metnin kısa özeti]' yaz ki kullanıcı doğru okunup okunmadığını görsün.\n"
+        f"2. Sonra soruyu/isteği doğrudan cevapla.\n"
+        f"3. Matematik/fizik problemiyse: Verilenler → Formül → Adım adım çözüm → Sonuç (birimleriyle).\n"
+        f"4. Kod görüntüsüyse: Kodu analiz et, hataları bul, düzeltme öner.\n"
+        f"5. Genel metin/belge ise: İçeriği özetle ve soruyu cevapla.\n"
+        f"6. Türkçe yanıt ver, samimi ve doğrudan konuş, 3. tekil şahıs kullanma."
     )
     
     # Geçmişi bağlama dahil et ki model conversation context'ini bilsin

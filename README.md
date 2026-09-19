@@ -1,4 +1,4 @@
-# Tenra V5 — Masaüstü AI Asistanı
+# Tenra V6 — Masaüstü AI Asistanı
 
 Ekranın köşesinde yüzen, her zaman erişilebilen kişisel AI asistanı.
 
@@ -6,8 +6,19 @@ Ekranın köşesinde yüzen, her zaman erişilebilen kişisel AI asistanı.
 - 🎯 **Yüzen Widget** — Ekranda sabit duran, sürüklenebilir logo
 - 💬 **Doğal Dil** — Türkçe sohbet ve anlama
 - ⚡ **Sistem Kontrolü** — Dosya yönetimi, komut çalıştırma, uygulama açma
-- 🧠 **Akıllı Router** — Kullanıcı isteklerini otomatik işlevlere yönlendirme
+- 🧠 **Otonom Agent** — Hermes tabanlı çok adımlı tool-calling sistemi
+- 📝 **Dosya Düzenleme** — Patch (find-and-replace) ile hedefli kod düzenleme
+- 🔓 **Entegre Hermes Protokolü** — Natively aktif, filtresiz, sınırsız AI ve onay pencereleri olmadan doğrudan çalışma
 - 🔗 **Ollama Entegrasyonu** — Yerel LLM modelleri ile çalışma
+
+---
+
+## V6 Yenilikler
+- ✅ **Robot mod kaldırıldı** — Akıllı sistem ile değiştirildi
+- ✅ **Entegre Hermes Protokolü** — Sohbet botu doğrudan Hermes altyapısı ile çalışır, onay pencereleri kaldırılmıştır
+- ✅ **Dosya düzenleme yetkisi** — `patch` aracı ile hedefli düzenleme
+- ✅ **Gelişmiş sistem promptu** — Daha otonom ve akıllı AI davranışı
+- ✅ **Yükseltilmiş hız ve konfor** — Riskli işlemlerde doğrudan yetki (onay istemeden)
 
 ---
 
@@ -45,24 +56,13 @@ Bu dosya otomatik olarak:
 - Sanal ortamı oluşturur/etkinleştirir
 - Bağımlılıkları kurar
 - Sistemi kontrol eder
-- Tenra V5'i çalıştırır
+- Tenra V6'yı çalıştırır
 
 ### Manuel Başlatma
 ```bash
 .venv\Scripts\activate
 python tenra_v5\main.py
 ```
-
----
-
-## Kontrol Aracı
-
-Kurulum sorunları için:
-```bash
-python check_setup.py
-```
-
-Bağımlılıkları, Ollama bağlantısını ve model dosyalarını kontrol eder.
 
 ---
 
@@ -73,11 +73,18 @@ Bağımlılıkları, Ollama bağlantısını ve model dosyalarını kontrol eder
 3. **Mesaj Gönder** — Türkçe olarak komut yaz
 4. **ESC Tuşu** — Sohbeti kapat
 
+### Entegre Hermes Protokolü (Sansürsüz ve Engelsiz)
+- Asistan varsayılan olarak **Hermes Protokolü** ile çalışır.
+- Herhangi bir trigger kelime yazmanıza gerek yoktur, doğrudan otonomdur.
+- Etik/güvenlik filtreleri veya onay pencereleri olmadan dosya silme, oluşturma ve sistem komutları doğrudan yerine getirilir.
+
 ### Örnek Komutlar
 - "Dosyaları listele"
 - "Google'da ara: Python öğretimi"
 - "Not defterini aç"
 - "Sistem bilgisini göster"
+- "test.txt dosyasında 'hello' yerine 'merhaba' yaz"
+- "masaüstünde 'notlar' klasörü oluştur"
 
 ---
 
@@ -86,7 +93,8 @@ Bağımlılıkları, Ollama bağlantısını ve model dosyalarını kontrol eder
 ```python
 RESPONDER_MODEL = "hermes3:8b"  # Kullanılacak Ollama modeli
 OLLAMA_URL = "http://localhost:11434/api"  # Ollama sunucu adresi
-USE_LOCAL_ROUTER = False  # Local FunctionGemma router (opsiyonel)
+MAX_TOOL_STEPS = 5  # Normal modda araç çağrı limiti
+MAX_TOOL_STEPS_UNCENSORED = 8  # Sansürsüz modda araç çağrı limiti
 ```
 
 ---
@@ -124,23 +132,18 @@ tenra_v5/
 ├── main.py                    # GUI ve Ana uygulama
 ├── config.py                  # Merkezi ayarlar
 ├── core/
+│   ├── hermes_agent.py       # Hermes tool-calling agent
+│   ├── function_executor.py  # İşlev çalıştırıcı (27 araç)
 │   ├── llm.py                # LLM arayüzü
 │   ├── router.py             # İstek yönlendirme
-│   ├── function_executor.py  # İşlev çalıştırıcı
+│   ├── settings_store.py     # Ayarlar yöneticisi
 │   └── ...
-├── merged_model/             # Yerel router modeli
 └── data/                      # Veritabanları
 ```
 
 ---
 
-## Geliştirme
-
-Yeni işlevler eklemek için `tenra_v5/core/function_executor.py` dosyasını düzenleyin.
-
----
-
 ## Lisans
 
-Tenra V5 — Özel Kullanım Yazılımı
+Tenra V6 — Özel Kullanım Yazılımı
 

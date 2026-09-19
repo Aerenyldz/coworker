@@ -1,5 +1,5 @@
 """
-Tenra V5 — LLM Arayüzü
+Tenra V6 — LLM Arayüzü
 Router + Ollama Responder entegrasyonu.
 """
 

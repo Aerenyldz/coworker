@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """
-Tenra V5 setup checker.
+Tenra V6 setup checker.
 Validates Python environment, dependencies, Ollama access and model files.
 """
 
@@ -12,7 +12,7 @@ def main() -> int:
     all_ok = True
 
     print("=" * 60)
-    print("TENRA V5 - SETUP CHECK")
+    print("TENRA V7 - SETUP CHECK")
     print("=" * 60)
     print()
 
@@ -25,8 +25,6 @@ def main() -> int:
     packages = [
         ("PySide6", "PySide6"),
         ("requests", "requests"),
-        ("torch", "torch"),
-        ("transformers", "transformers"),
         ("keyboard", "keyboard"),
         ("pyautogui", "pyautogui"),
     ]
@@ -43,35 +41,72 @@ def main() -> int:
 
     # 3) Ollama connectivity
     print("System checks:")
+    ollama_ok = False
+    models = []
     try:
         import requests
+        import subprocess
+        import time
 
-        response = requests.get("http://localhost:11434/api/tags", timeout=3)
-        if response.status_code == 200:
-            data = response.json()
-            models = [m["name"] for m in data.get("models", [])]
+        try:
+            response = requests.get("http://localhost:11434/api/tags", timeout=2)
+            if response.status_code == 200:
+                ollama_ok = True
+                models = [m["name"] for m in response.json().get("models", [])]
+        except Exception:
+            pass
+
+        if not ollama_ok:
+            print("  [*] Ollama is not running. Attempting to start 'ollama serve' automatically...")
+            # Start ollama serve in a background process without a popup command window
+            # 0x08000000 is CREATE_NO_WINDOW
+            try:
+                subprocess.Popen(["ollama", "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=0x08000000)
+                
+                # Poll for up to 15 seconds
+                for i in range(15):
+                    time.sleep(1)
+                    try:
+                        response = requests.get("http://localhost:11434/api/tags", timeout=2)
+                        if response.status_code == 200:
+                            ollama_ok = True
+                            models = [m["name"] for m in response.json().get("models", [])]
+                            print("  [OK] Ollama started successfully")
+                            break
+                    except Exception:
+                        pass
+            except FileNotFoundError:
+                print("  [ERR] Ollama is not installed or not in system PATH.")
+                print("        Please download Ollama from https://ollama.com/")
+                all_ok = False
+            except Exception as e:
+                print(f"  [ERR] Failed to start Ollama automatically: {e}")
+                all_ok = False
+
+        if ollama_ok:
             print("  [OK] Ollama is running")
             print(f"       Installed models: {', '.join(models) if models else 'none'}")
             
             # Check for vision model
-            if not any("llava" in m for m in models):
-                print("  [WARN] 'llava' (vision model) is NOT installed!")
-                print("         Run 'ollama pull llava' to enable screenshot analysis.")
+            if not any("vision" in m or "llava" in m for m in models):
+                print("  [WARN] A vision model ('llama3.2-vision' or 'llava') is NOT installed!")
+                print("         Run 'ollama pull llama3.2-vision' to enable screenshot analysis.")
             else:
-                print("  [OK] Vision model (llava) is installed.")
+                print("  [OK] Vision model is installed.")
         else:
-            print(f"  [ERR] Ollama returned status {response.status_code}")
-            all_ok = False
+            if all_ok:
+                print("  [ERR] Ollama check failed: Could not connect to Ollama after auto-start attempt.")
+                print("        Solution: run 'ollama serve' in a terminal")
+                all_ok = False
     except Exception as err:
         print(f"  [ERR] Ollama check failed: {err}")
-        print("       Solution: run 'ollama serve' in a terminal")
         all_ok = False
 
     print()
 
     # 4) Local router model files
     print("Model files:")
-    model_path = os.path.join(os.path.dirname(__file__), "tenra_v5", "merged_model")
+    model_path = os.path.join(os.path.dirname(__file__), "tenra_v5", "_dev_archive", "merged_model")
     if os.path.exists(model_path):
         files = os.listdir(model_path)
         preview = ", ".join(files[:3])
@@ -79,8 +114,8 @@ def main() -> int:
         print(f"  [OK] {model_path} exists")
         print(f"       Files: {preview}{suffix}")
     else:
-        print(f"  [ERR] Missing folder: {model_path}")
-        all_ok = False
+        print(f"  [WARN] Missing folder: {model_path}")
+        print("         (Safe to ignore if USE_LOCAL_ROUTER is False in config.py)")
 
     print()
 
