@@ -9,10 +9,10 @@ __pycache__/
 *.swp
 
 # Runtime data
-tenra_v5/data/*.db
-tenra_v5/data/screenshots/
-tenra_v5/data/browser_profiles/
+data/
+_archive_v1/
 *.db
+tenra_v5/data/
 
 # Local secrets
 .env

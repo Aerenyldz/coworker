@@ -1,0 +1,11 @@
+# Tenra 2.0 — Bağımlılıklar
+PySide6>=6.6.0
+requests>=2.31.0
+pyautogui>=0.9.54
+Pillow>=10.2.0
+send2trash>=1.8.0
+beautifulsoup4>=4.12.0
+pytesseract>=0.3.10
+ddgs>=9.0
+SpeechRecognition>=3.10.0
+PyAudio>=0.2.14

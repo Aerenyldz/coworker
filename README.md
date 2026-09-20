@@ -1,149 +1,100 @@
-# Tenra V6 — Masaüstü AI Asistanı
+# Tenra 2.0 — Otonom Masaüstü & Proje Geliştirici AI Asistanı
 
-Ekranın köşesinde yüzen, her zaman erişilebilen kişisel AI asistanı.
-
-## Özellikler
-- 🎯 **Yüzen Widget** — Ekranda sabit duran, sürüklenebilir logo
-- 💬 **Doğal Dil** — Türkçe sohbet ve anlama
-- ⚡ **Sistem Kontrolü** — Dosya yönetimi, komut çalıştırma, uygulama açma
-- 🧠 **Otonom Agent** — Hermes tabanlı çok adımlı tool-calling sistemi
-- 📝 **Dosya Düzenleme** — Patch (find-and-replace) ile hedefli kod düzenleme
-- 🔓 **Entegre Hermes Protokolü** — Natively aktif, filtresiz, sınırsız AI ve onay pencereleri olmadan doğrudan çalışma
-- 🔗 **Ollama Entegrasyonu** — Yerel LLM modelleri ile çalışma
+Antigravity mantığıyla yeniden inşa edilmiş, bilgisayarda ve projelerde otonom eylem gerçekleştiren yerel yapay zeka asistanı.
 
 ---
 
-## V6 Yenilikler
-- ✅ **Robot mod kaldırıldı** — Akıllı sistem ile değiştirildi
-- ✅ **Entegre Hermes Protokolü** — Sohbet botu doğrudan Hermes altyapısı ile çalışır, onay pencereleri kaldırılmıştır
-- ✅ **Dosya düzenleme yetkisi** — `patch` aracı ile hedefli düzenleme
-- ✅ **Gelişmiş sistem promptu** — Daha otonom ve akıllı AI davranışı
-- ✅ **Yükseltilmiş hız ve konfor** — Riskli işlemlerde doğrudan yetki (onay istemeden)
+## 🌟 Öne Çıkan Özellikler
+
+- 📁 **Proje & Çalışma Alanı (Workspace) Yönetimi:**
+  - Sol kenar çubuğundan masaüstü veya herhangi bir dizindeki projeyi seçebilme.
+  - Projeye özel ve bağımsız sohbet oturumları.
+  - PowerShell ve dosya işlemlerinin doğrudan seçili proje dizinine kilitlenmesi.
+- 🎙️ **Sesle Dikte (Speech-to-Text):**
+  - Girdi çubuğunda mikrofon butonu (`🎙️`) ve `Ctrl + M` / `F4` kısayolları.
+  - Hızlı ve yüksek doğrulukta Türkçe konuşma tanıma (`tr-TR`).
+  - Windows 11 `Win + H` sesle yazma entegrasyonu.
+- 🪟 **Gelişmiş Pencere Deneyimi:**
+  - Normal masaüstü pencere davranışı (diğer uygulamalara tıklandığında arkaya geçebilir, `Alt + Tab` desteği).
+  - İsteğe bağlı tek tıkla pencere sabitleme (`📌 Pin`).
+- ⚡ **4 Çekirdek Otonom Araç:**
+  - `shell`: PowerShell komut yürütme (seçili proje dizininde).
+  - `file`: Dosya okuma, yazma, düzenleme (patch), silme, listeleme ve arama.
+  - `web`: DuckDuckGo araması, sayfa okuma, URL açma.
+  - `screen`: Tıklama, yazma, kısayol tuşları ve ekran alıntısı (snipping).
+- 🧠 **Qwen3 Agent Motoru:**
+  - Gerçek çok adımlı tool-calling döngüsü.
+  - Yazım hatalarına (typo), eksik harflere ve Türkçe karakter kaymalarına tam tolerans.
+  - Akıllı ve bulanık dosya çözümleme (`difflib` + fonetik eşleştirme).
+- 👁️ **Görsel Zeka (Vision & OCR):**
+  - Ekran alıntısı (snipping) ve dosya yükleme (`📷`, `📎`).
+  - Moondream Vision modeli ve Tesseract OCR ile zenginleştirilmiş analiz.
 
 ---
 
-## Kurulum
+## 🚀 Hızlı Başlangıç
 
 ### 1. Gereksinimler
+- Windows 10/11
 - Python 3.11+
-- [Ollama](https://ollama.ai) kurulu ve `ollama serve` komutunun çalışır halde olması
+- [Ollama](https://ollama.ai)
 
-### 2. Sanal Ortam (ilk kez)
+### 2. Ollama Modellerini İndirin
 ```bash
-python -m venv .venv
-.venv\Scripts\activate
-pip install -r tenra_v5\requirements.txt
+ollama pull qwen3:8b
+ollama pull moondream:latest
 ```
 
-### 3. Ollama Modeli
-Ollama'yı başlatıp gerekli modeli yükleyin:
+### 3. Başlatma
+Proje dizinindeki `tenra.bat` dosyasını çift tıklayın:
 ```bash
-ollama serve
-# Başka bir terminal'de:
-ollama pull hermes3:8b
+tenra.bat
+```
+
+Script otomatik olarak:
+1. Arka planda Ollama servisini kontrol eder ve gerekiyorsa başlatır.
+2. Python sanal ortamını (`.venv`) yapılandırır.
+3. Bağımlılıkları kurar ve Tenra 2.0 Agent Studio'yu ekrana getirir.
+
+---
+
+## 🏗️ Proje Mimarisi
+
+```
+coworker/
+├── tenra.bat              # Tek tıkla Windows başlatıcı
+├── requirements.txt       # Üretim bağımlılıkları
+├── README.md
+├── tenra/                 # Tenra 2.0 ana paketi
+│   ├── config.py          # Sistem istemi, model ve ortam ayarları
+│   ├── core/
+│   │   ├── agent.py       # Qwen3 otonom karar ve araç döngüsü
+│   │   ├── executor.py    # 4 çekirdek araç (shell, file, web, screen)
+│   │   ├── llm_backend.py # Ollama REST API istemcisi
+│   │   └── workspace_manager.py # Proje ve sohbet yöneticisi
+│   ├── ui/
+│   │   ├── app.py         # Uygulama yaşam döngüsü
+│   │   ├── chat_window.py # Agent Studio yatay ana penceresi
+│   │   ├── sidebar_widget.py # Sol panel (Projeler & Sohbetler)
+│   │   ├── floating_widget.py # Yüzen masaüstü widget'ı
+│   │   ├── snipping.py    # Ekran alıntısı aracı
+│   │   ├── colors.py      # Stüdyo tema renkleri
+│   │   └── markdown.py    # Markdown & kart renderlayıcı
+│   ├── voice/
+│   │   └── stt.py         # Ses tanıma (Speech-to-Text) iş parçacığı
+│   └── plugins/           # Eklenti yuvaları (Hermes3 vb.)
 ```
 
 ---
 
-## Çalıştırma
+## ⌨️ Kısayollar
 
-### Kolay Başlatma (Önerilir)
-```bash
-run_tenra_v5.bat
-```
-
-Bu dosya otomatik olarak:
-- Sanal ortamı oluşturur/etkinleştirir
-- Bağımlılıkları kurar
-- Sistemi kontrol eder
-- Tenra V6'yı çalıştırır
-
-### Manuel Başlatma
-```bash
-.venv\Scripts\activate
-python tenra_v5\main.py
-```
-
----
-
-## Kullanım
-
-1. **Widget'i Tıkla** — Ekranda yüzen "T" logosu
-2. **Sohbeti Aç** — Sohbet penceresi belirecek
-3. **Mesaj Gönder** — Türkçe olarak komut yaz
-4. **ESC Tuşu** — Sohbeti kapat
-
-### Entegre Hermes Protokolü (Sansürsüz ve Engelsiz)
-- Asistan varsayılan olarak **Hermes Protokolü** ile çalışır.
-- Herhangi bir trigger kelime yazmanıza gerek yoktur, doğrudan otonomdur.
-- Etik/güvenlik filtreleri veya onay pencereleri olmadan dosya silme, oluşturma ve sistem komutları doğrudan yerine getirilir.
-
-### Örnek Komutlar
-- "Dosyaları listele"
-- "Google'da ara: Python öğretimi"
-- "Not defterini aç"
-- "Sistem bilgisini göster"
-- "test.txt dosyasında 'hello' yerine 'merhaba' yaz"
-- "masaüstünde 'notlar' klasörü oluştur"
-
----
-
-## Ayarlar (`config.py`)
-
-```python
-RESPONDER_MODEL = "hermes3:8b"  # Kullanılacak Ollama modeli
-OLLAMA_URL = "http://localhost:11434/api"  # Ollama sunucu adresi
-MAX_TOOL_STEPS = 5  # Normal modda araç çağrı limiti
-MAX_TOOL_STEPS_UNCENSORED = 8  # Sansürsüz modda araç çağrı limiti
-```
-
----
-
-## Sorun Giderme
-
-### "Ollama sunucusu çalışmıyor"
-```bash
-# Yeni terminal'de:
-ollama serve
-```
-
-### "Modeller yüklenmedi"
-```bash
-ollama pull hermes3:8b
-```
-
-### "PySide6 hatası"
-```bash
-pip install --upgrade PySide6
-```
-
-### "Genel sorun"
-Kontrol aracını çalıştırın:
-```bash
-python check_setup.py
-```
-
----
-
-## Mimari
-
-```
-tenra_v5/
-├── main.py                    # GUI ve Ana uygulama
-├── config.py                  # Merkezi ayarlar
-├── core/
-│   ├── hermes_agent.py       # Hermes tool-calling agent
-│   ├── function_executor.py  # İşlev çalıştırıcı (27 araç)
-│   ├── llm.py                # LLM arayüzü
-│   ├── router.py             # İstek yönlendirme
-│   ├── settings_store.py     # Ayarlar yöneticisi
-│   └── ...
-└── data/                      # Veritabanları
-```
+- `Enter`: Mesajı gönder
+- `Ctrl + M` veya `F4`: Sesle dikteyi başlat / durdur (🎙️)
+- `Esc`: Pencereyi gizle
+- `📌`: Pencereyi en üste sabitle / normal moda al
 
 ---
 
 ## Lisans
-
-Tenra V6 — Özel Kullanım Yazılımı
-
+Tenra 2.0 — Özel Kullanım Yazılımı
