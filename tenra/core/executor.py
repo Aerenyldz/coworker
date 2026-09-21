@@ -32,6 +32,59 @@ class TenraExecutor:
             p = Path(self.workspace_path) / p
         return str(p)
 
+    def _is_safe_path(self, full_path: str) -> tuple[bool, str]:
+        """Bir dosya yolunun sistem dizinleri veya çalışma alanı dışında olup olmadığını denetler."""
+        try:
+            target = Path(full_path).resolve()
+            ws = Path(self.workspace_path).resolve()
+            dt = Path(self.desktop_path).resolve()
+
+            # Yasaklı Windows sistem alanları
+            sys_root = Path(os.environ.get("SystemRoot", "C:\\Windows")).resolve()
+            prog_files = Path(os.environ.get("ProgramFiles", "C:\\Program Files")).resolve()
+            prog_files_x86 = Path(os.environ.get("ProgramFiles(x86)", "C:\\Program Files (x86)")).resolve()
+
+            for restricted in (sys_root, prog_files, prog_files_x86):
+                if target == restricted or restricted in target.parents:
+                    return False, f"Sistem dizinine müdahale engellendi ({restricted.name})"
+
+            # Sürücü kök dizini kontrolü (C:\, D:\ gibi yerlere doğrudan yazma/silme)
+            if str(target) in ("C:\\", "D:\\", "E:\\", "c:\\", "d:\\", "e:\\"):
+                return False, "Sürücü kök dizinine doğrudan müdahale engellendi."
+
+            # Çalışma alanı veya Masaüstü içindeyse güvenli
+            if target == ws or ws in target.parents or target == dt or dt in target.parents:
+                return True, "Güvenli çalışma alanı"
+
+            # Farklı bir kullanıcı veya sistem diziniyse onay gerekir
+            return False, f"Çalışma alanı dışındaki dizine erişim ({target})"
+        except Exception as e:
+            return False, f"Yol doğrulama hatası: {e}"
+
+    def _is_dangerous_command(self, command: str) -> tuple[bool, str]:
+        """PowerShell komutunun yıkıcı/tehlikeli olup olmadığını denetler."""
+        cmd = command.strip().lower()
+
+        dangerous_patterns = [
+            (r"\brm\s+-[rRfF]", "Özyinelemeli (recursive) dosya silme"),
+            (r"\bremove-item\b.*-recurse", "Özyinelemeli PowerShell dosya silme"),
+            (r"\bdel\s+/[sS]", "Tüm alt dizinleri silme"),
+            (r"\bformat-volume\b|\bformat\s+[a-zA-Z]:", "Disk formatlama komutu"),
+            (r"\bdiskpart\b", "Disk bölümleme komutu"),
+            (r"\bstop-computer\b|\brestart-computer\b|\bshutdown\b", "Bilgisayarı kapatma/yeniden başlatma"),
+            (r"\breg\s+(delete|add)\b", "Windows Kayıt Defteri (Registry) müdahalesi"),
+            (r"\bset-executionpolicy\b", "PowerShell güvenlik ilkesini değiştirme"),
+            (r"\bnet\s+user\b", "Kullanıcı hesabı oluşturma/değiştirme"),
+            (r"\bgit\s+push\b.*--force", "Git zorla gönderme (force push)"),
+            (r"\bgit\s+reset\b.*--hard", "Git tüm yerel değişiklikleri geri alma (hard reset)"),
+        ]
+
+        for pattern, desc in dangerous_patterns:
+            if re.search(pattern, cmd):
+                return True, desc
+
+        return False, ""
+
     def execute(self, tool_name, params):
         synonyms = {
             "cmd": "shell", "powershell": "shell", "run": "shell",
@@ -49,7 +102,13 @@ class TenraExecutor:
                 tool_name = matches[0]
             else:
                 return {"error": True, "message": f"Tool '{tool_name}' not found."}
-                
+
+        if self.tool_start_callback:
+            try:
+                self.tool_start_callback(tool_name)
+            except Exception:
+                pass
+
         try:
             if tool_name == "shell":
                 return self._tool_shell(**params)
@@ -63,6 +122,19 @@ class TenraExecutor:
             return {"error": True, "message": f"Execution failed: {str(e)}"}
             
     def _tool_shell(self, command, timeout=30):
+        # Güvenlik Kontrolü (Riskli komut interceptor)
+        is_dangerous, reason = self._is_dangerous_command(command)
+        if is_dangerous:
+            if self.approval_callback:
+                allowed = self.approval_callback("shell", {
+                    "command": command,
+                    "warning": f"Yüksek riskli komut tespit edildi: {reason}"
+                })
+                if not allowed:
+                    return {"error": True, "message": f"İşlem kullanıcı tarafından reddedildi ({reason})."}
+            else:
+                return {"error": True, "message": f"Güvenlik kalkanı: Bu riskli komut kullanıcı onayı olmadan çalıştırılamaz ({reason})."}
+
         try:
             cwd = self.workspace_path if os.path.isdir(self.workspace_path) else self.desktop_path
             result = subprocess.run(['powershell', '-Command', command], 
@@ -150,25 +222,99 @@ class TenraExecutor:
             return {"success": True, "content": text, "total_lines": len(lines), "path": full_path}
             
         elif action == "write":
+            is_safe, reason = self._is_safe_path(full_path)
+            if not is_safe:
+                if self.approval_callback:
+                    allowed = self.approval_callback("path_security", {
+                        "path": full_path,
+                        "warning": reason
+                    })
+                    if not allowed:
+                        return {"error": True, "message": f"İşlem reddedildi: {reason}"}
+                else:
+                    return {"error": True, "message": f"Güvenlik kalkanı: {reason}"}
+
+            # Var olan dosya üzerine yazılıyorsa diff üret ve onay iste
+            if os.path.exists(full_path):
+                try:
+                    with open(full_path, 'r', encoding='utf-8', errors='ignore') as f:
+                        old_content = f.read()
+                    if old_content.strip() and self.approval_callback:
+                        old_lines = old_content.replace('\r\n', '\n').splitlines(keepends=True)
+                        new_lines = (content or "").replace('\r\n', '\n').splitlines(keepends=True)
+                        diff_lines = list(difflib.unified_diff(
+                            old_lines, new_lines,
+                            fromfile=f"a/{os.path.basename(full_path)}",
+                            tofile=f"b/{os.path.basename(full_path)}",
+                            n=3
+                        ))
+                        diff_text = "".join(diff_lines)
+                        if diff_text.strip():
+                            approved = self.approval_callback("diff_write", {
+                                "path": full_path,
+                                "filename": os.path.basename(full_path),
+                                "diff": diff_text,
+                                "action": "write"
+                            })
+                            if not approved:
+                                return {"error": True, "message": "Kullanıcı dosya değişikliğini reddetti."}
+                except Exception:
+                    pass
+
             os.makedirs(os.path.dirname(full_path), exist_ok=True)
             with open(full_path, 'w', encoding='utf-8') as f:
                 f.write(content or "")
-            return {"success": True, "message": f"File written: {full_path}"}
+            return {"success": True, "message": f"Dosya kaydedildi: {full_path}"}
             
         elif action == "patch":
             if not os.path.exists(full_path):
                 return {"error": True, "message": "File not found."}
+
+            is_safe, reason = self._is_safe_path(full_path)
+            if not is_safe:
+                if self.approval_callback:
+                    allowed = self.approval_callback("path_security", {
+                        "path": full_path,
+                        "warning": reason
+                    })
+                    if not allowed:
+                        return {"error": True, "message": f"İşlem reddedildi: {reason}"}
+                else:
+                    return {"error": True, "message": f"Güvenlik kalkanı: {reason}"}
+
             with open(full_path, 'r', encoding='utf-8', errors='ignore') as f:
                 data = f.read()
             data_norm = data.replace('\r\n', '\n')
             old_norm = (old_string or "").replace('\r\n', '\n')
+            new_norm = (new_string or "").replace('\r\n', '\n')
             if old_norm in data_norm:
-                data_norm = data_norm.replace(old_norm, (new_string or ""))
+                patched_data = data_norm.replace(old_norm, new_norm)
             else:
                 return {"error": True, "message": "Target string not found for patch."}
+
+            # Diff üret ve kullanıcı onayına sun
+            old_lines = data_norm.splitlines(keepends=True)
+            new_lines = patched_data.splitlines(keepends=True)
+            diff_lines = list(difflib.unified_diff(
+                old_lines, new_lines,
+                fromfile=f"a/{os.path.basename(full_path)}",
+                tofile=f"b/{os.path.basename(full_path)}",
+                n=3
+            ))
+            diff_text = "".join(diff_lines)
+            if self.approval_callback and diff_text.strip():
+                approved = self.approval_callback("diff_patch", {
+                    "path": full_path,
+                    "filename": os.path.basename(full_path),
+                    "diff": diff_text,
+                    "action": "patch"
+                })
+                if not approved:
+                    return {"error": True, "message": "Kullanıcı kod güncellemesini (patch) reddetti."}
+
             with open(full_path, 'w', encoding='utf-8') as f:
-                f.write(data_norm)
-            return {"success": True, "message": "File patched successfully."}
+                f.write(patched_data)
+            return {"success": True, "message": f"Dosya güncellendi ({os.path.basename(full_path)})", "diff": diff_text}
             
         elif action == "create":
             if os.path.exists(full_path):
@@ -178,7 +324,7 @@ class TenraExecutor:
                 f.write(content or "")
             return {"success": True, "message": "File created."}
             
-        elif action == "delete":
+        elif action in ("delete", "trash"):
             if not os.path.exists(full_path):
                 # Fuzzy matching fallback
                 dir_path = os.path.dirname(full_path)
@@ -187,23 +333,30 @@ class TenraExecutor:
                     matches = difflib.get_close_matches(os.path.basename(full_path), files, n=1, cutoff=0.6)
                     if matches:
                         full_path = os.path.join(dir_path, matches[0])
-            if os.path.exists(full_path):
+            if not os.path.exists(full_path):
+                return {"error": True, "message": "File not found."}
+
+            # Silme işlemi için zorunlu kullanıcı onayı
+            if self.approval_callback:
+                approved = self.approval_callback("delete", {
+                    "path": full_path,
+                    "filename": os.path.basename(full_path),
+                    "is_dir": os.path.isdir(full_path),
+                    "warning": f"'{os.path.basename(full_path)}' {'klasörü' if os.path.isdir(full_path) else 'dosyası'} çöp kutusuna taşınacak!"
+                })
+                if not approved:
+                    return {"error": True, "message": "Kullanıcı silme işlemini onaylamadı."}
+
+            try:
+                import send2trash
+                send2trash.send2trash(full_path)
+                return {"success": True, "message": f"'{os.path.basename(full_path)}' güvenli şekilde çöp kutusuna taşındı."}
+            except Exception:
                 if os.path.isdir(full_path):
                     shutil.rmtree(full_path)
                 else:
                     os.remove(full_path)
-                return {"success": True, "message": "Deleted permanently."}
-            return {"error": True, "message": "File not found."}
-            
-        elif action == "trash":
-            try:
-                import send2trash
-                if os.path.exists(full_path):
-                    send2trash.send2trash(full_path)
-                    return {"success": True, "message": "Moved to recycle bin."}
-                return {"error": True, "message": "File not found."}
-            except ImportError:
-                return {"error": True, "message": "send2trash not installed."}
+                return {"success": True, "message": f"'{os.path.basename(full_path)}' silindi."}
                 
         elif action == "rename":
             new_path = self._get_path(kwargs.get("new_name", ""))

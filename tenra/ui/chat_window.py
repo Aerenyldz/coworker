@@ -1031,11 +1031,89 @@ class ChatWindow(QMainWindow):
 
     def _on_tool_approval_requested(self, func_name: str, params_str: str):
         import html as html_mod
+        import json
+        
+        params = {}
+        try:
+            params = json.loads(params_str)
+        except Exception:
+            params = {"raw": params_str}
+
+        # Case 1: Kod Diff Önizleme Onayı (patch / write)
+        if "diff" in params and params["diff"]:
+            filename = params.get("filename", "Dosya")
+            diff_text = params["diff"]
+            diff_card = make_diff_card_html(filename, diff_text)
+            action_name = "Kod Güncellemesi (Patch)" if func_name == "diff_patch" else "Dosya Üzerine Yazma"
+            html = (
+                f'<div style="background:{Colors.BG_CARD.name()};border:1px solid {Colors.ACCENT.name()};'
+                f'border-radius:10px;padding:14px;margin:10px 0;">'
+                f'<div style="color:{Colors.ACCENT.name()};font-weight:bold;font-size:13px;margin-bottom:8px;">'
+                f'📝 {action_name} Onayı: <code>{html_mod.escape(filename)}</code></div>'
+                f'<div style="margin-bottom:12px;">{diff_card}</div>'
+                f'<div>'
+                f'<a href="action://approve_tool" style="background:{Colors.ACCENT_GREEN.name()};color:#000;padding:7px 18px;'
+                f'text-decoration:none;border-radius:6px;font-weight:bold;font-size:12px;margin-right:10px;">✓ Değişiklikleri Onayla ve Uygula</a>'
+                f'<a href="action://deny_tool" style="background:{Colors.ACCENT_RED.name()};color:#fff;padding:7px 18px;'
+                f'text-decoration:none;border-radius:6px;font-weight:bold;font-size:12px;">✕ Değişiklikleri Reddet</a>'
+                f'</div>'
+                f'</div>'
+            )
+            self._add_html(html)
+            self._append_console(f"📝 Kod değişikliği onayı bekleniyor: {filename}", "info")
+            return
+
+        # Case 2: Dosya Silme / Çöp Kutusu Onayı
+        if func_name == "delete":
+            filename = params.get("filename", "Dosya")
+            warning = params.get("warning", "Dosya silinecek!")
+            html = (
+                f'<div style="background:{Colors.BG_CARD.name()};border:1px solid {Colors.ACCENT_RED.name()};'
+                f'border-radius:10px;padding:14px;margin:10px 0;">'
+                f'<div style="color:{Colors.ACCENT_RED.name()};font-weight:bold;font-size:13px;margin-bottom:6px;">'
+                f'🗑️ Silme Onayı: <code>{html_mod.escape(filename)}</code></div>'
+                f'<div style="color:{Colors.TEXT.name()};font-size:12px;margin-bottom:12px;">{html_mod.escape(warning)}</div>'
+                f'<div>'
+                f'<a href="action://approve_tool" style="background:{Colors.ACCENT_RED.name()};color:#fff;padding:7px 18px;'
+                f'text-decoration:none;border-radius:6px;font-weight:bold;font-size:12px;margin-right:10px;">✓ Çöp Kutusuna Taşı</a>'
+                f'<a href="action://deny_tool" style="background:{Colors.BG_CARD2.name()};color:{Colors.TEXT_MUTED.name()};padding:7px 18px;'
+                f'text-decoration:none;border-radius:6px;font-weight:bold;font-size:12px;border:1px solid {Colors.BORDER.name()};">✕ İptal Et</a>'
+                f'</div>'
+                f'</div>'
+            )
+            self._add_html(html)
+            self._append_console(f"🗑️ Silme onayı bekleniyor: {filename}", "error")
+            return
+
+        # Case 3: Riskli Shell Komutu Onayı
+        if func_name == "shell":
+            command = params.get("command", "")
+            warning = params.get("warning", "Riskli sistem komutu")
+            html = (
+                f'<div style="background:{Colors.BG_CARD.name()};border:1px solid {Colors.ACCENT_YELLOW.name()};'
+                f'border-radius:10px;padding:14px;margin:10px 0;">'
+                f'<div style="color:{Colors.ACCENT_YELLOW.name()};font-weight:bold;font-size:13px;margin-bottom:6px;">'
+                f'⚡ Yüksek Riskli Terminal Komutu Onayı</div>'
+                f'<div style="color:{Colors.TEXT_MUTED.name()};font-size:12px;margin-bottom:8px;">{html_mod.escape(warning)}</div>'
+                f'<pre style="background:{Colors.TERMINAL_BG.name()};color:{Colors.ACCENT_RED.name()};padding:10px 14px;border-radius:6px;font-family:Consolas;font-size:12px;margin:0 0 12px;border:1px solid {Colors.BORDER.name()};">$ {html_mod.escape(command)}</pre>'
+                f'<div>'
+                f'<a href="action://approve_tool" style="background:{Colors.ACCENT_YELLOW.name()};color:#000;padding:7px 18px;'
+                f'text-decoration:none;border-radius:6px;font-weight:bold;font-size:12px;margin-right:10px;">✓ Komutu Çalıştır</a>'
+                f'<a href="action://deny_tool" style="background:{Colors.BG_CARD2.name()};color:{Colors.TEXT_MUTED.name()};padding:7px 18px;'
+                f'text-decoration:none;border-radius:6px;font-weight:bold;font-size:12px;border:1px solid {Colors.BORDER.name()};">✕ Komutu Reddet</a>'
+                f'</div>'
+                f'</div>'
+            )
+            self._add_html(html)
+            self._append_console(f"⚠ Riskli komut onayı bekleniyor: {command[:60]}", "error")
+            return
+
+        # Case 4: Genel Güvenlik Onayı
         safe_params = html_mod.escape(params_str)
         html = (
             f'<div style="background:{Colors.BG_CARD.name()};border:1px solid {Colors.ACCENT_RED.name()};'
             f'border-radius:10px;padding:14px;margin:10px 0;">'
-            f'<div style="color:{Colors.ACCENT_RED.name()};font-weight:bold;margin-bottom:8px;">⚠ Onay Gerekiyor: {func_name}</div>'
+            f'<div style="color:{Colors.ACCENT_RED.name()};font-weight:bold;margin-bottom:8px;">⚠ Güvenlik Onayı: {func_name}</div>'
             f'<pre style="color:{Colors.TEXT_MUTED.name()};font-size:11px;font-family:Consolas;margin:0 0 12px;">{safe_params}</pre>'
             f'<a href="action://approve_tool" style="background:{Colors.ACCENT_GREEN.name()};color:#000;padding:6px 16px;'
             f'text-decoration:none;border-radius:6px;font-weight:bold;font-size:12px;margin-right:10px;">✓ İzin Ver</a>'
