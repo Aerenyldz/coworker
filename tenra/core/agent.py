@@ -31,8 +31,10 @@ from ..config import (
     DESKTOP_PATH,
     APP_VERSION,
     get_system_prompt,
+    MEMORY_FILE,
 )
 from .llm_backend import OllamaBackend
+from .memory import MemoryStore
 
 
 # ═══════════════════════════════════════════════
@@ -124,7 +126,8 @@ def _extract_tool_calls(message: Dict[str, Any]) -> List[Dict[str, Any]]:
         if not name:
             continue
         args = _coerce_arguments(function_block.get("arguments", {}))
-        calls.append({"name": name, "arguments": args})
+        call_id = call.get("id") or function_block.get("id")
+        calls.append({"name": name, "arguments": args, "id": call_id})
 
     if calls:
         return calls
@@ -268,6 +271,13 @@ def is_informational_or_analysis_query(text: str) -> bool:
 # MAIN AGENT TOOL LOOP
 # ═══════════════════════════════════════════════
 
+def _record_run_memory(ws_path: str, user_input: str, tool_results: list, reply: str):
+    try:
+        store = MemoryStore(MEMORY_FILE)
+        store.auto_learn_from_agent_run(ws_path, user_input, tool_results, reply)
+    except Exception:
+        pass
+
 def run_agent_loop(
     user_input: str,
     executor: Any,
@@ -336,24 +346,30 @@ def run_agent_loop(
                     "result": result,
                 })
 
-                messages.append({
+                tool_msg: Dict[str, Any] = {
                     "role": "tool",
                     "name": fn_name,
                     "content": json.dumps(result, ensure_ascii=False),
-                })
+                }
+                if tc.get("id"):
+                    tool_msg["tool_call_id"] = tc["id"]
+                messages.append(tool_msg)
             continue
 
         # --- Case 2: Pure text response (araç gerekmedi) ---
         if assistant_text:
+            _record_run_memory(ws_path, user_input, tool_results, assistant_text)
             return {"ok": True, "reply": assistant_text, "tool_results": tool_results}
 
         # --- Case 3: Boş cevap ama önceki araç sonuçları var ---
         if tool_results:
             last_result = tool_results[-1].get("result", {})
             fallback_reply = sanitize_assistant_text(str(last_result.get("message", "")))
+            reply = fallback_reply or "İşlem tamamlandı."
+            _record_run_memory(ws_path, user_input, tool_results, reply)
             return {
                 "ok": True,
-                "reply": fallback_reply or "İşlem tamamlandı.",
+                "reply": reply,
                 "tool_results": tool_results,
             }
 
@@ -364,9 +380,11 @@ def run_agent_loop(
     if tool_results:
         last_result = tool_results[-1].get("result", {})
         fallback_reply = sanitize_assistant_text(str(last_result.get("message", "")))
+        reply = fallback_reply or "İşlem tamamlandı."
+        _record_run_memory(ws_path, user_input, tool_results, reply)
         return {
             "ok": True,
-            "reply": fallback_reply or "İşlem tamamlandı.",
+            "reply": reply,
             "tool_results": tool_results,
         }
 

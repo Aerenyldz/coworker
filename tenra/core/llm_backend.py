@@ -2,6 +2,7 @@ import requests
 import logging
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+from ..config import DEFAULT_NUM_CTX
 
 logger = logging.getLogger(__name__)
 
@@ -13,12 +14,15 @@ class OllamaBackend:
         retries = Retry(total=3, backoff_factor=0.3, status_forcelist=[500, 502, 503, 504])
         self.session.mount('http://', HTTPAdapter(max_retries=retries))
 
-    def chat(self, messages, tools=None, model=None, temperature=0.3, num_predict=2048, num_ctx=4096):
+    def chat(self, messages, tools=None, model=None, temperature=0.3, num_predict=2048, num_ctx=None, think=False):
+        if num_ctx is None:
+            num_ctx = DEFAULT_NUM_CTX
         url = f"{self.base_url}/chat"
         payload = {
             "model": model or self.default_model,
             "messages": messages,
             "stream": False,
+            "think": think,
             "options": {
                 "temperature": temperature,
                 "num_predict": num_predict,
@@ -29,7 +33,7 @@ class OllamaBackend:
             payload["tools"] = tools
 
         try:
-            response = self.session.post(url, json=payload, timeout=120)
+            response = self.session.post(url, json=payload, timeout=180)
             response.raise_for_status()
             return response.json()
         except requests.exceptions.Timeout:
@@ -39,8 +43,14 @@ class OllamaBackend:
             logger.error("Ollama chat connection error")
             return {"error": "ConnectionError", "message": "Could not connect to Ollama."}
         except requests.exceptions.RequestException as e:
-            logger.error(f"Ollama chat HTTP error: {e}")
-            return {"error": "RequestException", "message": str(e)}
+            err_body = ""
+            if hasattr(e, "response") and e.response is not None:
+                try:
+                    err_body = f" | Sunucu Cevabı: {e.response.text}"
+                except Exception:
+                    pass
+            logger.error(f"Ollama chat HTTP error: {e}{err_body}")
+            return {"error": "RequestException", "message": f"{str(e)}{err_body}"}
 
     def generate(self, prompt, model=None, images=None, temperature=0.1):
         url = f"{self.base_url}/generate"

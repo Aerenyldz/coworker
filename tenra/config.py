@@ -27,6 +27,11 @@ DATA_DIR = _base_dir / "data"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 WORKSPACE_FILE = DATA_DIR / "workspaces.json"
 
+DEFAULT_NUM_CTX = 8192
+INDEX_DIR = DATA_DIR / "indexes"
+INDEX_DIR.mkdir(parents=True, exist_ok=True)
+MEMORY_FILE = DATA_DIR / "memory.json"
+
 def get_system_prompt(workspace_path: str = None, workspace_name: str = None) -> str:
     target_ws = workspace_path or DESKTOP_PATH
     ws_title = workspace_name or ("Masaüstü" if target_ws == DESKTOP_PATH else os.path.basename(target_ws))
@@ -39,11 +44,31 @@ def get_system_prompt(workspace_path: str = None, workspace_name: str = None) ->
     except Exception:
         pass
 
+    repo_map_block = ""
+    try:
+        from .core.indexer import CodeIndexer
+        indexer = CodeIndexer(INDEX_DIR)
+        repo_map = indexer.get_repo_map(target_ws, max_chars=3500)
+        if repo_map:
+            repo_map_block = f"\n\n{repo_map}"
+    except Exception:
+        pass
+
+    memory_block = ""
+    try:
+        from .core.memory import MemoryStore
+        memory_store = MemoryStore(MEMORY_FILE)
+        mem_summary = memory_store.get_memory_summary(target_ws, max_chars=1500)
+        if mem_summary:
+            memory_block = f"\n\n{mem_summary}"
+    except Exception:
+        pass
+
     return f"""Sen {APP_NAME}'sın. Antigravity tarzı, bilgisayarda ve projelerde otonom eylem gerçekleştiren gelişmiş bir masaüstü yapay zeka asistanısın.
 Kullanıcı: {USER_NAME}
 İşletim Sistemi: {OS_INFO}
 Masaüstü Dizini: {DESKTOP_PATH}
-⚡ AKTİF ÇALIŞMA ALANI (PROJE): [{ws_title}] -> {target_ws}{files_summary}
+⚡ AKTİF ÇALIŞMA ALANI (PROJE): [{ws_title}] -> {target_ws}{files_summary}{repo_map_block}{memory_block}
 
 KESİN ÇALIŞMA KURALLARI VE PRENSİPLER:
 1. SEN BİR SOHBET BOTU DEĞİLSİN; DOĞRUDAN BİLGİSAYARDA ÇALIŞAN BİR GELİŞTİRİCİ ASİSTANSIN.
@@ -57,6 +82,7 @@ KESİN ÇALIŞMA KURALLARI VE PRENSİPLER:
 6. Linux yollarını (/home/user/...) ASLA kullanma; Windows yollarını kullan.
 7. Genel felsefi/teorik bilgi sorularında doğrudan yanıt ver; ancak soru mevcut proje, dosya veya sistemle ilgiliyse DAİMA araçlarını kullanarak dosyayı oku ve doğrula.
 8. YAZIM VE SES HATALARINA TOLERANS: Kullanıcı mesajlarında yazım hataları (typo), eksik veya bitişik harfler, sesle yazmadan (speech-to-text) kaynaklı fonetik kaymalar veya Türkçe karakter eksiklikleri (ı/i, ş/s, ç/c, ğ/g, ö/o, ü/u) olsa dahi kullanıcının asıl niyetini ve hedeflediği dosya veya eylemi anla. Hataları sorgulamak veya düzeltmek yerine doğrudan kullanıcının kastettiği işlemi yerine getir.
+9. PROJE KOD HARİTASI VE HAFIZA KULLANIMI: Sana sağlanan Proje Kod Haritası (AST) sayesinde projedeki tüm dosya, sınıf ve fonksiyonları önceden bilirsin. Dosyaları ezbere tahmin etmek yerine bu haritayı referans al, gerektiğinde 'file' aracıyla içeriğini oku. Kalıcı hafızadaki kurallara ve önceki deneyimlere sadık kal.
 """
 
 SYSTEM_PROMPT = get_system_prompt()
