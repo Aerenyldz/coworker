@@ -1,10 +1,4 @@
-"""Tenra 2.0 — Proje ve Sohbet (Workspace & Conversation) Yöneticisi
-
-Antigravity benzeri çalışma alanı yönetimi:
-- Projeler (Masaüstü, Coworker, Özel Klasörler)
-- Sohbetler (Projeye bağlı veya bağımsız genel sohbetler)
-- Kalıcı JSON tabanlı veri saklama (data/workspaces.json)
-"""
+"""Tenra 2.0 — Proje ve Sohbet yöneticisi (proje başına izole bağlam)."""
 
 from __future__ import annotations
 
@@ -19,7 +13,7 @@ from tenra.config import DESKTOP_PATH
 
 
 class WorkspaceManager:
-    """Projeleri ve sohbet oturumlarını yöneten ve kalıcı saklayan sınıf."""
+    """Her projenin kendi sohbetleri / bağlamı vardır (Antigravity / Cursor modeli)."""
 
     def __init__(self, storage_file: Optional[Path | str] = None):
         if storage_file is None:
@@ -33,12 +27,11 @@ class WorkspaceManager:
             "active_workspace_id": "ws-desktop",
             "active_conversation_id": "conv-default",
             "workspaces": [],
-            "conversations": []
+            "conversations": [],
         }
         self.load()
 
     def load(self) -> None:
-        """Verileri dosyadan oku veya varsayılanları oluştur."""
         if self.storage_file.exists():
             try:
                 with open(self.storage_file, "r", encoding="utf-8") as f:
@@ -49,33 +42,39 @@ class WorkspaceManager:
         else:
             self._init_defaults()
 
-        # Doğrulama: Varsayılan projeler var mı?
         ws_ids = {ws["id"] for ws in self.data.get("workspaces", [])}
         if "ws-desktop" not in ws_ids:
             self.data.setdefault("workspaces", []).insert(0, {
                 "id": "ws-desktop",
                 "name": "Masaüstü",
                 "path": DESKTOP_PATH,
-                "created_at": datetime.now().isoformat()
+                "created_at": datetime.now().isoformat(),
             })
+            ws_ids.add("ws-desktop")
 
-        # Coworker projesini kontrol et
         coworker_path = str(Path(__file__).resolve().parent.parent.parent)
         if not any(ws.get("path") == coworker_path for ws in self.data["workspaces"]):
             self.data["workspaces"].append({
                 "id": "ws-coworker",
                 "name": "Coworker (Tenra 2.0)",
                 "path": coworker_path,
-                "created_at": datetime.now().isoformat()
+                "created_at": datetime.now().isoformat(),
             })
 
-        if not self.data.get("conversations"):
-            self.create_conversation("Genel Sohbet", workspace_id=None)
+        # Eski bağımsız sohbetleri Masaüstü'ne bağla (proje bağlamı zorunlu)
+        for c in self.data.get("conversations", []):
+            wid = c.get("workspace_id")
+            if not wid or wid not in {w["id"] for w in self.data.get("workspaces", [])}:
+                c["workspace_id"] = "ws-desktop"
 
+        if not self.data.get("conversations"):
+            self.create_conversation("Genel Sohbet", workspace_id="ws-desktop")
+
+        # Aktif sohbet aktif projeye ait değilse düzelt
+        self._sync_active_conversation_to_workspace()
         self.save()
 
     def _init_defaults(self) -> None:
-        """İlk kurulum varsayılan projelerini ve sohbetini oluşturur."""
         coworker_path = str(Path(__file__).resolve().parent.parent.parent)
         self.data = {
             "active_workspace_id": "ws-desktop",
@@ -85,28 +84,27 @@ class WorkspaceManager:
                     "id": "ws-desktop",
                     "name": "Masaüstü",
                     "path": DESKTOP_PATH,
-                    "created_at": datetime.now().isoformat()
+                    "created_at": datetime.now().isoformat(),
                 },
                 {
                     "id": "ws-coworker",
                     "name": "Coworker (Tenra 2.0)",
                     "path": coworker_path,
-                    "created_at": datetime.now().isoformat()
-                }
+                    "created_at": datetime.now().isoformat(),
+                },
             ],
             "conversations": [
                 {
                     "id": "conv-default",
                     "title": "Genel Sohbet",
-                    "workspace_id": None,
+                    "workspace_id": "ws-desktop",
                     "messages": [],
-                    "updated_at": datetime.now().isoformat()
+                    "updated_at": datetime.now().isoformat(),
                 }
-            ]
+            ],
         }
 
     def save(self) -> None:
-        """Mevcut durumu JSON dosyasına kaydeder."""
         try:
             self.storage_file.parent.mkdir(parents=True, exist_ok=True)
             with open(self.storage_file, "w", encoding="utf-8") as f:
@@ -114,148 +112,192 @@ class WorkspaceManager:
         except Exception as e:
             print(f"[WorkspaceManager] Kaydetme hatası: {e}")
 
-    # ── PROJE (WORKSPACE) İŞLEMLERİ ─────────────────────────
+    def _sort_convs(self, convs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        return sorted(
+            convs,
+            key=lambda c: c.get("updated_at") or c.get("created_at") or "",
+            reverse=True,
+        )
+
+    def _sync_active_conversation_to_workspace(self) -> None:
+        """Aktif sohbet, aktif projeye ait değilse o projenin son sohbetine geç."""
+        ws = self.get_active_workspace()
+        ws_id = ws["id"]
+        active = self.get_active_conversation()
+        if active and active.get("workspace_id") == ws_id:
+            return
+        convs = self.get_conversations(workspace_id=ws_id)
+        if convs:
+            self.data["active_conversation_id"] = convs[0]["id"]
+        else:
+            new_c = self.create_conversation("Genel Sohbet", workspace_id=ws_id)
+            self.data["active_conversation_id"] = new_c["id"]
+
+    # ── PROJE ─────────────────────────────────────────────
 
     def get_workspaces(self) -> List[Dict[str, Any]]:
-        """Tüm kayıtlı projeleri döner."""
         return self.data.get("workspaces", [])
 
     def get_active_workspace(self) -> Dict[str, Any]:
-        """Şu an seçili olan projeyi döner."""
         active_id = self.data.get("active_workspace_id", "ws-desktop")
         for ws in self.data.get("workspaces", []):
             if ws["id"] == active_id:
                 return ws
-        # Bulunamazsa ilkini veya masaüstünü dön
         if self.data.get("workspaces"):
             return self.data["workspaces"][0]
         return {"id": "ws-desktop", "name": "Masaüstü", "path": DESKTOP_PATH}
 
     def set_active_workspace(self, workspace_id: str) -> bool:
-        """Aktif projeyi değiştirir."""
+        """Projeyi seçer ve o projenin sohbet bağlamına geçer."""
         for ws in self.data.get("workspaces", []):
             if ws["id"] == workspace_id:
                 self.data["active_workspace_id"] = workspace_id
+                self._sync_active_conversation_to_workspace()
                 self.save()
                 return True
         return False
 
     def add_workspace(self, path: str, name: Optional[str] = None) -> Dict[str, Any]:
-        """Yeni bir proje klasörü ekler."""
         p = Path(path).resolve()
         if not p.exists() or not p.is_dir():
             raise ValueError(f"Geçersiz klasör yolu: {path}")
 
         norm_path = str(p)
-        # Zaten varsa olanı döndür
         for ws in self.data.get("workspaces", []):
             if ws.get("path") == norm_path:
-                self.data["active_workspace_id"] = ws["id"]
-                self.save()
+                self.set_active_workspace(ws["id"])
                 return ws
 
         ws_id = f"ws-{uuid.uuid4().hex[:8]}"
-        ws_name = name or p.name or "Yeni Proje"
         new_ws = {
             "id": ws_id,
-            "name": ws_name,
+            "name": name or p.name or "Yeni Proje",
             "path": norm_path,
-            "created_at": datetime.now().isoformat()
+            "created_at": datetime.now().isoformat(),
         }
         self.data.setdefault("workspaces", []).append(new_ws)
         self.data["active_workspace_id"] = ws_id
+        # Yeni projede boş sohbet bağlamı
+        self.create_conversation("Genel Sohbet", workspace_id=ws_id)
         self.save()
         return new_ws
 
     def remove_workspace(self, workspace_id: str) -> bool:
-        """Projeyi listeden kaldırır (klasörü silmez, sadece takipten çıkarır)."""
         if workspace_id == "ws-desktop":
-            return False # Masaüstü silinemez
+            return False
 
+        # Proje sohbetlerini de sil (bağlam izolasyonu)
+        self.data["conversations"] = [
+            c for c in self.data.get("conversations", [])
+            if c.get("workspace_id") != workspace_id
+        ]
         self.data["workspaces"] = [
             ws for ws in self.data.get("workspaces", []) if ws["id"] != workspace_id
         ]
         if self.data.get("active_workspace_id") == workspace_id:
             self.data["active_workspace_id"] = "ws-desktop"
+        self._sync_active_conversation_to_workspace()
         self.save()
         return True
 
-    # ── SOHBET (CONVERSATION) İŞLEMLERİ ───────────────────────
+    # ── SOHBET ────────────────────────────────────────────
 
-    def get_conversations(self, workspace_id: Optional[str] = None, only_independent: bool = False) -> List[Dict[str, Any]]:
-        """Sohbetleri listeler.
-        - only_independent=True ise bir projeye bağlı olmayanları döner.
-        - workspace_id belirtilmişse o projeye ait olanları döner.
-        - İkisi de yoksa tümünü döner.
-        """
+    def get_conversations(
+        self,
+        workspace_id: Optional[str] = None,
+        only_independent: bool = False,
+    ) -> List[Dict[str, Any]]:
         all_convs = self.data.get("conversations", [])
         if only_independent:
-            return [c for c in all_convs if not c.get("workspace_id")]
+            # Geriye dönük: artık bağımsız yok; boş liste
+            return []
         if workspace_id:
-            return [c for c in all_convs if c.get("workspace_id") == workspace_id]
-        return all_convs
+            return self._sort_convs(
+                [c for c in all_convs if c.get("workspace_id") == workspace_id]
+            )
+        return self._sort_convs(all_convs)
 
     def get_active_conversation(self) -> Optional[Dict[str, Any]]:
-        """Şu an aktif sohbeti döner."""
         active_id = self.data.get("active_conversation_id")
         for c in self.data.get("conversations", []):
             if c["id"] == active_id:
                 return c
-        # Yoksa ilkini dön
         if self.data.get("conversations"):
             return self.data["conversations"][0]
         return None
 
     def set_active_conversation(self, conversation_id: str) -> bool:
-        """Aktif sohbeti değiştirir."""
         for c in self.data.get("conversations", []):
             if c["id"] == conversation_id:
                 self.data["active_conversation_id"] = conversation_id
+                # Sohbet başka projedeyse projeyi de ona çek
+                wid = c.get("workspace_id")
+                if wid:
+                    self.data["active_workspace_id"] = wid
                 self.save()
                 return True
         return False
 
-    def create_conversation(self, title: str = "Yeni Sohbet", workspace_id: Optional[str] = None) -> Dict[str, Any]:
-        """Yeni bir sohbet oluşturur."""
+    def create_conversation(
+        self, title: str = "Yeni Sohbet", workspace_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        if not workspace_id:
+            workspace_id = self.get_active_workspace()["id"]
         conv_id = f"conv-{uuid.uuid4().hex[:8]}"
         new_conv = {
             "id": conv_id,
             "title": title,
             "workspace_id": workspace_id,
             "messages": [],
-            "updated_at": datetime.now().isoformat()
+            "created_at": datetime.now().isoformat(),
+            "updated_at": datetime.now().isoformat(),
         }
         self.data.setdefault("conversations", []).insert(0, new_conv)
         self.data["active_conversation_id"] = conv_id
+        self.data["active_workspace_id"] = workspace_id
         self.save()
         return new_conv
 
-    def save_conversation_messages(self, conversation_id: str, messages: List[Dict[str, Any]], title: Optional[str] = None) -> bool:
-        """Sohbetin mesaj geçmişini kaydeder."""
+    def save_conversation_messages(
+        self,
+        conversation_id: str,
+        messages: List[Dict[str, Any]],
+        title: Optional[str] = None,
+    ) -> bool:
         for c in self.data.get("conversations", []):
             if c["id"] == conversation_id:
                 c["messages"] = messages
                 c["updated_at"] = datetime.now().isoformat()
                 if title:
                     c["title"] = title
-                elif c.get("title") == "Yeni Sohbet" and messages:
-                    # İlk kullanıcı mesajından başlık türet
-                    first_user_msg = next((m.get("content", "") for m in messages if m.get("role") == "user"), "")
+                elif c.get("title") in ("Yeni Sohbet", "Genel Sohbet") and messages:
+                    first_user_msg = next(
+                        (m.get("content", "") for m in messages if m.get("role") == "user"),
+                        "",
+                    )
                     if first_user_msg:
-                        c["title"] = first_user_msg[:24].strip() + ("..." if len(first_user_msg) > 24 else "")
+                        c["title"] = first_user_msg[:24].strip() + (
+                            "..." if len(first_user_msg) > 24 else ""
+                        )
                 self.save()
                 return True
         return False
 
     def delete_conversation(self, conversation_id: str) -> bool:
-        """Sohbeti siler."""
+        target = next(
+            (c for c in self.data.get("conversations", []) if c["id"] == conversation_id),
+            None,
+        )
+        ws_id = (target or {}).get("workspace_id") or self.get_active_workspace()["id"]
+
         self.data["conversations"] = [
             c for c in self.data.get("conversations", []) if c["id"] != conversation_id
         ]
         if self.data.get("active_conversation_id") == conversation_id:
-            if self.data.get("conversations"):
-                self.data["active_conversation_id"] = self.data["conversations"][0]["id"]
+            siblings = self.get_conversations(workspace_id=ws_id)
+            if siblings:
+                self.data["active_conversation_id"] = siblings[0]["id"]
             else:
-                self.create_conversation("Genel Sohbet", workspace_id=None)
+                self.create_conversation("Genel Sohbet", workspace_id=ws_id)
         self.save()
         return True

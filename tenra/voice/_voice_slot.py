@@ -1,8 +1,9 @@
 """
-Placeholder for Voice features.
-Planned features:
-- Wake word 'Tenra' -> 'Efendim?'
-- STT (Speech-to-Text) using Whisper
-- TTS (Text-to-Speech) using Piper/Edge
-- Full voice pipeline integration
+Placeholder retired — see tenra.voice.stt and tenra.voice.tts.
+Wake-word 'Tenra' planned for a later pass.
 """
+
+from tenra.voice.stt import VoiceListenerThread
+from tenra.voice.tts import speak, get_synthesizer
+
+__all__ = ["VoiceListenerThread", "speak", "get_synthesizer"]

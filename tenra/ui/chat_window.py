@@ -7,11 +7,11 @@ from PySide6.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, Q
 from PySide6.QtGui import QFont, QColor, QPainter, QPen, QBrush, QLinearGradient, QIcon, QPixmap, QCursor, QKeyEvent, QGuiApplication, QScreen, QDesktopServices
 
 from tenra.ui.colors import Colors
-from tenra.ui.markdown import markdown_to_html, make_tool_card_html, make_terminal_card_html, make_diff_card_html
+from tenra.ui.markdown import markdown_to_html, make_tool_card_html, make_terminal_card_html, make_diff_card_html, make_multi_diff_card_html
 from tenra.ui.snipping import SnippingWidget, ClickableLabel
 from tenra.ui.sidebar_widget import SidebarWidget
 from tenra.core.workspace_manager import WorkspaceManager
-from tenra.config import MAIN_MODEL, VISION_MODEL, DESKTOP_PATH
+from tenra.config import MAIN_MODEL, VISION_MODEL, DESKTOP_PATH, TTS_ENABLED, TTS_AUTO_SPEAK, UNCENSORED_MODEL
 
 # ═══════════════════════════════════════════════
 # SIMPLE ACTION WORKER
@@ -28,8 +28,14 @@ class SimpleActionWorker(QThread):
     def run(self):
         try:
             if self.action_type == "delete":
-                result = self.executor.execute("move_to_trash", self.params)
-                self.action_finished.emit("move_to_trash", result.get("message", "İşlem tamamlandı."))
+                params = dict(self.params or {})
+                params.setdefault("action", "delete")
+                result = self.executor.execute("file", params)
+                ok = bool(result.get("success")) and not result.get("error")
+                self.action_finished.emit(
+                    "file",
+                    result.get("message", "İşlem tamamlandı." if ok else "Silme başarısız."),
+                )
         except Exception as e:
             self.action_finished.emit("Hata", str(e))
 
@@ -43,9 +49,11 @@ class LLMWorker(QThread):
     tool_approval_requested= Signal(str, str)
     tool_started           = Signal(str)
     terminal_output        = Signal(str, str, str, int)  # cmd, stdout, stderr, exit_code
+    token_received         = Signal(str)                 # streaming content delta
+    stream_reset           = Signal()                    # tool call → clear stream bubble
 
     def __init__(self, user_input: str, screenshot_path: str | None = None,
-                 chat_history: list = None, rpa_mode: bool = False, uncensored: bool = True,
+                 chat_history: list = None, rpa_mode: bool = False, uncensored: bool = False,
                  workspace_path: str = None):
         super().__init__()
         self.rpa_mode = rpa_mode
@@ -150,27 +158,43 @@ class LLMWorker(QThread):
             if shortcut:
                 sc_name, sc_result = shortcut
                 msg = sc_result.get("message", "İşlem tamamlandı.")
-                success = sc_result.get("success", True)
+                success = bool(sc_result.get("success")) and not sc_result.get("error")
                 self.tool_executed.emit(sc_name, msg, success)
                 self.response_ready.emit(msg, sc_name)
                 return
 
+            # Vision zenginleştirmesi varsa history'deki son user mesajını güncelle
+            # (çift user turn / çakışan bağlamı önler)
+            history_for_agent = list(self.chat_history)
+            if input_text != self.user_input:
+                if history_for_agent and history_for_agent[-1].get("role") == "user":
+                    history_for_agent[-1] = {
+                        **history_for_agent[-1],
+                        "content": input_text,
+                    }
+                else:
+                    history_for_agent.append({"role": "user", "content": input_text})
+
             # Hermes otonom araç döngüsü
             agent_result = run_agent_loop(
                 input_text, executor,
-                chat_history=self.chat_history,
-                
+                chat_history=history_for_agent,
+                on_token=lambda t: self.token_received.emit(t),
+                on_stream_reset=lambda: self.stream_reset.emit(),
+                uncensored=self.uncensored,
             )
 
             if not agent_result.get("ok"):
                 self.response_ready.emit(f"⚠ {agent_result.get('error', 'Bilinmeyen hata')}", "")
                 return
 
+            self.last_prompt_eval = agent_result.get("prompt_eval_count")
+
             # Araç sonuçlarını emit et
             for tool_call in agent_result.get("tool_results", []):
                 name = tool_call.get("name", "tool")
                 result = tool_call.get("result", {})
-                success = result.get("success", True)
+                success = bool(result.get("success")) and not result.get("error")
                 msg = result.get("message", "İşlem tamamlandı")
 
                 # Terminal çıktısı özel signal
@@ -224,12 +248,26 @@ class ChatWindow(QMainWindow):
         # Frameless normal pencere (diğer uygulamaların arkasına geçebilir, Alt+Tab yapılabilir)
         self.is_pinned = False
         self._voice_thread = None
+        self.uncensored_mode = False
+        self._active_model_label = "qwen3:8b"
+        self._last_batch_id = None
+        self._last_speakable = ""
+        self._stream_buffer = ""
+        self._stream_dirty = False
+        self._pre_stream_html = None
+        self._stream_started = False
         self.setWindowFlags(Qt.Window | Qt.FramelessWindowHint)
-        self.setAttribute(Qt.WA_TranslucentBackground)
+        # Yumuşak/bulanık kenar yok — opak panel, keskin çerçeve
+        self.setAttribute(Qt.WA_TranslucentBackground, False)
 
         self._build_ui()
         self._position_window()
         self._render_active_conversation()
+
+        # Stream UI flush (Cursor tarzı akıcı yazım — 40ms batch)
+        self._stream_flush_timer = QTimer(self)
+        self._stream_flush_timer.setInterval(40)
+        self._stream_flush_timer.timeout.connect(self._flush_stream_ui)
 
     def _position_window(self):
         screen = QApplication.primaryScreen().geometry()
@@ -242,23 +280,18 @@ class ChatWindow(QMainWindow):
         central = QWidget()
         self.setCentralWidget(central)
         outer = QVBoxLayout(central)
-        outer.setContentsMargins(8, 8, 8, 8)
+        outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
 
-        # Ana kart wrapper
+        # Ana panel — gölge/yuvarlak yok (yumuşak kenar hissi kalksın)
         self.container = QFrame()
         self.container.setStyleSheet(f"""
             QFrame {{
                 background: {Colors.BG_PANEL.name()};
                 border: 1px solid {Colors.BORDER.name()};
-                border-radius: 14px;
+                border-radius: 0;
             }}
         """)
-        shadow = QGraphicsDropShadowEffect()
-        shadow.setBlurRadius(32)
-        shadow.setColor(QColor(0, 0, 0, 180))
-        shadow.setOffset(0, 8)
-        self.container.setGraphicsEffect(shadow)
 
         container_layout = QVBoxLayout(self.container)
         container_layout.setContentsMargins(0, 0, 0, 0)
@@ -267,25 +300,37 @@ class ChatWindow(QMainWindow):
         # ── 1. CUSTOM HEADER ────────────────────────────
         self._build_header(container_layout)
 
-        # ── 2. YATAY 3 BÖLMELİ GÖVDE (SOL SİDEBAR, ORTA SOHBET, SAĞ KONSOL) ──
+        # ── 2. SOL SİDEBAR + ORTA SOHBET (+ isteğe bağlı sağ log) ──
         body_widget = QWidget()
         body_layout = QHBoxLayout(body_widget)
         body_layout.setContentsMargins(0, 0, 0, 0)
         body_layout.setSpacing(0)
 
-        # ── 2.1 SOL SİDEBAR: PROJELER & SOHBETLER ─────────
         self.sidebar = SidebarWidget(self.wm)
         self.sidebar.workspace_changed.connect(self._on_workspace_changed)
         self.sidebar.conversation_changed.connect(self._on_conversation_changed)
         self.sidebar.new_chat_requested.connect(self._on_new_chat_requested)
         body_layout.addWidget(self.sidebar)
 
-        # ── 2.2 ORTA PANEL: SOHBET & AGENT AKIŞI ──────────
         left_panel = QFrame()
         left_panel.setStyleSheet("background: transparent; border: none;")
         left_layout = QVBoxLayout(left_panel)
         left_layout.setContentsMargins(0, 0, 0, 0)
         left_layout.setSpacing(0)
+
+        # Breadcrumb satırı
+        self.breadcrumb = QLabel()
+        self.breadcrumb.setFont(QFont("Segoe UI", 11))
+        self.breadcrumb.setStyleSheet(f"""
+            QLabel {{
+                color: {Colors.TEXT_MUTED.name()};
+                background: transparent;
+                border: none;
+                padding: 12px 24px 4px 24px;
+            }}
+        """)
+        self._update_breadcrumb()
+        left_layout.addWidget(self.breadcrumb)
 
         self.chat_display = QTextBrowser()
         self.chat_display.setOpenExternalLinks(False)
@@ -295,10 +340,10 @@ class ChatWindow(QMainWindow):
             QTextBrowser {{
                 background: transparent;
                 border: none;
-                padding: 14px 12px;
+                padding: 8px 28px 16px 28px;
                 color: {Colors.TEXT.name()};
-                font-family: 'Segoe UI', Arial, sans-serif;
-                font-size: 13px;
+                font-family: 'Segoe UI', system-ui, sans-serif;
+                font-size: 14px;
                 selection-background-color: {Colors.ACCENT_DIM.name()};
             }}
             QScrollBar:vertical {{
@@ -307,7 +352,7 @@ class ChatWindow(QMainWindow):
                 margin: 0;
             }}
             QScrollBar::handle:vertical {{
-                background: {Colors.BORDER_LIGHT.name()};
+                background: {Colors.BORDER.name()};
                 border-radius: 3px;
                 min-height: 20px;
             }}
@@ -328,10 +373,7 @@ class ChatWindow(QMainWindow):
                 border-radius: 0;
             }}
             QProgressBar::chunk {{
-                background: qlineargradient(x1:0,y1:0,x2:1,y2:0,
-                    stop:0 {Colors.ACCENT.name()},
-                    stop:0.5 {Colors.ACCENT_PURPLE.name()},
-                    stop:1 {Colors.ACCENT.name()});
+                background: {Colors.TEXT_MUTED.name()};
             }}
         """)
         self.loading_bar.hide()
@@ -339,14 +381,17 @@ class ChatWindow(QMainWindow):
         self.tool_label = QLabel()
         self.tool_label.setStyleSheet(f"""
             QLabel {{
-                color: {Colors.ACCENT.name()};
-                font-size: 11px;
-                font-family: Consolas, monospace;
-                padding: 4px 16px;
+                color: {Colors.TEXT_MUTED.name()};
+                font-size: 12px;
+                font-family: 'Segoe UI', sans-serif;
+                padding: 4px 28px;
                 background: transparent;
             }}
         """)
         self.tool_label.hide()
+
+        self.stream_preview = None
+        self._stream_buffer = ""
 
         self._build_preview_bar(left_layout)
 
@@ -356,47 +401,42 @@ class ChatWindow(QMainWindow):
         left_layout.addWidget(self.preview_frame)
         self._build_input_bar(left_layout)
 
-        # ── 2.3 SAĞ PANEL: CANLI KOMUT VE LOG AKIŞI ───────
-        right_panel = QFrame()
-        right_panel.setFixedWidth(300)
-        right_panel.setStyleSheet(f"""
+        # Sağ log — varsayılan gizli (Antigravity gibi temiz orta alan)
+        self.right_panel = QFrame()
+        self.right_panel.setFixedWidth(280)
+        self.right_panel.setStyleSheet(f"""
             QFrame {{
                 background: {Colors.BG_CARD.name()};
                 border-left: 1px solid {Colors.BORDER.name()};
-                border-bottom-right-radius: 14px;
+                border-bottom-right-radius: 0;
             }}
         """)
-        right_layout = QVBoxLayout(right_panel)
+        right_layout = QVBoxLayout(self.right_panel)
         right_layout.setContentsMargins(12, 12, 12, 12)
-        right_layout.setSpacing(10)
+        right_layout.setSpacing(8)
 
-        # Sağ Header: Console başlığı
         console_hdr = QHBoxLayout()
-        con_lbl = QLabel("⚡ CANLI LOG & AKIŞ")
+        con_lbl = QLabel("Aktivite")
         con_lbl.setFont(QFont("Segoe UI", 10, QFont.Bold))
-        con_lbl.setStyleSheet(f"color: {Colors.ACCENT.name()}; border: none; background: transparent;")
-
-        clear_con_btn = QPushButton("🧹")
-        clear_con_btn.setToolTip("Konsolu Temizle")
-        clear_con_btn.setFixedSize(24, 24)
+        con_lbl.setStyleSheet(f"color: {Colors.TEXT_MUTED.name()}; border: none; background: transparent;")
+        clear_con_btn = QPushButton("Temizle")
+        clear_con_btn.setFixedHeight(22)
+        clear_con_btn.setCursor(Qt.PointingHandCursor)
         clear_con_btn.setStyleSheet(f"""
             QPushButton {{
                 background: transparent;
-                color: {Colors.TEXT_MUTED.name()};
-                border: 1px solid {Colors.BORDER.name()};
-                border-radius: 4px;
+                color: {Colors.TEXT_DIM.name()};
+                border: none;
                 font-size: 11px;
             }}
-            QPushButton:hover {{ background: {Colors.BG_CARD2.name()}; color: {Colors.TEXT.name()}; }}
+            QPushButton:hover {{ color: {Colors.TEXT.name()}; }}
         """)
         clear_con_btn.clicked.connect(self._clear_console)
-
         console_hdr.addWidget(con_lbl)
         console_hdr.addStretch()
         console_hdr.addWidget(clear_con_btn)
         right_layout.addLayout(console_hdr)
 
-        # Canlı Terminal / Event Log Konsolu
         self.console_display = QTextBrowser()
         self.console_display.setStyleSheet(f"""
             QTextBrowser {{
@@ -404,49 +444,60 @@ class ChatWindow(QMainWindow):
                 border: 1px solid {Colors.BORDER.name()};
                 border-radius: 8px;
                 padding: 8px;
-                color: #c9d1d9;
+                color: {Colors.TEXT_MUTED.name()};
                 font-family: Consolas, monospace;
                 font-size: 11px;
             }}
-            QScrollBar:vertical {{
-                width: 5px;
-                background: transparent;
-            }}
-            QScrollBar::handle:vertical {{
-                background: {Colors.BORDER.name()};
-                border-radius: 2px;
-            }}
         """)
         self.console_display.setHtml(
-            f"<span style='color:{Colors.TEXT_DIM.name()};'>[Tenra 2.0 hazır. Canlı komut ve araç akışı burada listelenir.]</span><br>"
+            f"<span style='color:{Colors.TEXT_DIM.name()};'>Araç ve komut izleri burada.</span>"
         )
         right_layout.addWidget(self.console_display, 1)
 
-        # Sohbeti Temizle Butonu
-        btn_clear = QPushButton("🗑 Sohbeti Temizle")
+        btn_clear = QPushButton("Sohbeti temizle")
+        btn_clear.setCursor(Qt.PointingHandCursor)
         btn_clear.setStyleSheet(self._action_btn_style())
         btn_clear.clicked.connect(self._clear_chat_history)
         right_layout.addWidget(btn_clear)
 
-        # Birleştir
+        self.right_panel.hide()  # Antigravity: sağ panel yok / kapalı
+
         body_layout.addWidget(left_panel, 1)
-        body_layout.addWidget(right_panel)
+        body_layout.addWidget(self.right_panel)
         container_layout.addWidget(body_widget, 1)
 
         outer.addWidget(self.container)
 
+    def _update_breadcrumb(self):
+        ws = (self.active_workspace or {}).get("name", "Masaüstü")
+        conv = ""
+        if self.active_conversation:
+            conv = self.active_conversation.get("title", "Sohbet")
+        if conv:
+            self.breadcrumb.setText(f"{ws}  /  {conv}")
+        else:
+            self.breadcrumb.setText(ws)
+
+    def _toggle_activity_panel(self):
+        if self.right_panel.isVisible():
+            self.right_panel.hide()
+            self.activity_btn.setToolTip("Aktivite panelini aç")
+        else:
+            self.right_panel.show()
+            self.activity_btn.setToolTip("Aktivite panelini gizle")
+
     def _render_active_conversation(self):
         """Aktif sohbetin mesajlarını ekrana çizer veya karşılama mesajını gösterir."""
+        self._update_breadcrumb()
         self.chat_display.setHtml("<html><body style='background:transparent;margin:0;padding:0;'></body></html>")
         if not self.chat_history:
             ws_title = self.active_workspace.get("name", "Masaüstü")
-            ws_path = self.active_workspace.get("path", "")
             self._add_assistant_message(
-                f"**Tenra 2.0 hazır.**\n\n"
-                f"• **Aktif Proje:** `{ws_title}`\n"
-                f"• **Dizin:** `{ws_path}`\n\n"
-                f"Sol panelden üzerinde çalışmak istediğiniz projeyi seçebilir veya yeni sohbet açabilirsiniz."
+                f"Merhaba — **{ws_title}** üzerindeyim.\n\n"
+                f"Bu sohbet yalnızca bu projeye ait. Yeni sohbet açarsan bağlam sıfırlanır.\n\n"
+                f"Ne yapmak istersin?"
             )
+            self._update_context_badge()
             return
 
         for msg in self.chat_history:
@@ -456,21 +507,40 @@ class ChatWindow(QMainWindow):
                 self._add_user_message(content)
             elif role == "assistant":
                 self._add_assistant_message(content)
+        self._update_context_badge()
 
     def _on_workspace_changed(self, ws_id: str, ws_path: str):
-        """Kullanıcı sol panelden projeyi değiştirdiğinde çağrılır."""
+        """Proje değişince o projenin sohbet bağlamına geç."""
         self.active_workspace = self.wm.get_active_workspace()
-        self.project_badge.setText(f"📁 {self.active_workspace.get('name', 'Masaüstü')}")
+        self.active_conversation = self.wm.get_active_conversation()
+        self.chat_history = (
+            list(self.active_conversation.get("messages", []))
+            if self.active_conversation else []
+        )
+        self.project_badge.setText(self.active_workspace.get("name", "Masaüstü"))
         self.project_badge.setToolTip(self.active_workspace.get("path", ""))
-        self._append_console(f"Aktif Proje Değişti: {self.active_workspace.get('name')} ({ws_path})", "info")
+        self._render_active_conversation()
+        self._append_console(
+            f"Proje bağlamı: {self.active_workspace.get('name')} "
+            f"/ {(self.active_conversation or {}).get('title', 'Sohbet')}",
+            "info",
+        )
 
     def _on_conversation_changed(self, conv_id: str):
-        """Kullanıcı sol panelden sohbet değiştirdiğinde çağrılır."""
+        """Sohbet değişince geçmişi yükle (proje bağlamı izole)."""
+        self.active_workspace = self.wm.get_active_workspace()
         self.active_conversation = self.wm.get_active_conversation()
-        self.chat_history = list(self.active_conversation.get("messages", [])) if self.active_conversation else []
+        self.chat_history = (
+            list(self.active_conversation.get("messages", []))
+            if self.active_conversation else []
+        )
+        self.project_badge.setText(self.active_workspace.get("name", "Masaüstü"))
         self._render_active_conversation()
-        title = self.active_conversation.get("title", "Sohbet") if self.active_conversation else "Yeni Sohbet"
-        self._append_console(f"Sohbet Yüklendi: {title}", "info")
+        title = (
+            self.active_conversation.get("title", "Sohbet")
+            if self.active_conversation else "Yeni Sohbet"
+        )
+        self._append_console(f"Sohbet bağlamı: {title}", "info")
 
     def _on_new_chat_requested(self):
         """Yeni sohbet açıldığında çağrılır."""
@@ -492,8 +562,8 @@ class ChatWindow(QMainWindow):
             }}
             QPushButton:hover {{
                 background: {Colors.BORDER.name()};
-                color: {Colors.ACCENT.name()};
-                border-color: {Colors.ACCENT.name()};
+                color: {Colors.TEXT.name()};
+                border-color: {Colors.TEXT_MUTED.name()};
             }}
         """
 
@@ -525,6 +595,7 @@ class ChatWindow(QMainWindow):
             self.wm.save_conversation_messages(self.active_conversation["id"], [])
             self.sidebar.refresh()
         self._render_active_conversation()
+        self._update_context_badge()
         self._append_console("Sohbet belleği temizlendi.", "info")
 
     def _quick_prompt(self, text: str):
@@ -533,98 +604,128 @@ class ChatWindow(QMainWindow):
 
     def _build_header(self, layout):
         header = QFrame()
-        header.setFixedHeight(50)
+        header.setFixedHeight(48)
         header.setStyleSheet(f"""
             QFrame {{
                 background: {Colors.BG_HEADER.name()};
                 border-bottom: 1px solid {Colors.BORDER.name()};
-                border-top-left-radius: 14px;
-                border-top-right-radius: 14px;
+                border-top-left-radius: 0px;
+                border-top-right-radius: 0px;
             }}
         """)
         hl = QHBoxLayout(header)
         hl.setContentsMargins(16, 0, 12, 0)
-        hl.setSpacing(10)
+        hl.setSpacing(8)
 
-        # Logo dot + title
-        dot = QLabel("●")
-        dot.setStyleSheet(f"color: {Colors.ACCENT.name()}; font-size: 10px; background: transparent; border: none;")
-        title = QLabel("TENRA")
+        title = QLabel("Tenra")
         title.setFont(QFont("Segoe UI", 13, QFont.Bold))
         title.setStyleSheet(f"color: {Colors.TEXT.name()}; background: transparent; border: none;")
-        ver = QLabel("v2.0 · Agent Studio")
-        ver.setFont(QFont("Segoe UI", 9))
-        ver.setStyleSheet(f"color: {Colors.TEXT_DIM.name()}; background: transparent; border: none; margin-top: 3px;")
 
-        # Active workspace badge
         ws_name = self.active_workspace.get("name", "Masaüstü")
-        self.project_badge = QLabel(f"📁 {ws_name}")
-        self.project_badge.setFont(QFont("Segoe UI", 9, QFont.Bold))
+        self.project_badge = QLabel(ws_name)
+        self.project_badge.setFont(QFont("Segoe UI", 9))
         self.project_badge.setStyleSheet(f"""
             QLabel {{
-                color: {Colors.ACCENT.name()};
+                color: {Colors.TEXT_MUTED.name()};
                 background: {Colors.BG_CARD2.name()};
                 border: 1px solid {Colors.BORDER.name()};
-                border-radius: 6px;
-                padding: 2px 8px;
+                border-radius: 8px;
+                padding: 3px 10px;
             }}
         """)
         self.project_badge.setToolTip(self.active_workspace.get("path", ""))
 
-        sep = QLabel("·")
-        sep.setStyleSheet(f"color: {Colors.TEXT_DIM.name()}; background: transparent; border: none;")
-
-        # Active model label
         self.model_label = QLabel("qwen3:8b")
-        self.model_label.setFont(QFont("Consolas", 9))
-        self.model_label.setStyleSheet(f"color: {Colors.TEXT_MUTED.name()}; background: transparent; border: none;")
+        self.model_label.setFont(QFont("Segoe UI", 9))
+        self.model_label.setStyleSheet(f"color: {Colors.TEXT_DIM.name()}; background: transparent; border: none;")
 
-        # Status dot
         self.status_dot = QLabel("●")
         self.status_dot.setStyleSheet(f"color: {Colors.ACCENT_GREEN.name()}; font-size: 8px; background: transparent; border: none;")
 
-        self.status_text = QLabel("Aktif")
+        self.status_text = QLabel("Hazır")
         self.status_text.setFont(QFont("Segoe UI", 9))
         self.status_text.setStyleSheet(f"color: {Colors.TEXT_MUTED.name()}; background: transparent; border: none;")
 
-        # Window buttons
+        self.activity_btn = QPushButton("☰")
+        self.activity_btn.setFixedSize(28, 28)
+        self.activity_btn.setToolTip("Aktivite panelini aç")
+        self.activity_btn.setCursor(Qt.PointingHandCursor)
+        self.activity_btn.setStyleSheet("""
+            QPushButton { color: #8c8c91; background: transparent; border: none; border-radius: 8px; font-size: 14px; }
+            QPushButton:hover { background: rgba(255,255,255,0.06); color: #e8e8e8; }
+        """)
+        self.activity_btn.clicked.connect(self._toggle_activity_panel)
+
+        self.hack_btn = QPushButton("🔓")
+        self.hack_btn.setFixedSize(28, 28)
+        self.hack_btn.setToolTip(f"Hack / Sansürsüz Mod (kapalı) → {UNCENSORED_MODEL or 'model yok'}")
+        self.hack_btn.setStyleSheet(self._hack_style(False))
+        self.hack_btn.clicked.connect(self._toggle_uncensored)
+
+        self.undo_btn = QPushButton("↩")
+        self.undo_btn.setFixedSize(28, 28)
+        self.undo_btn.setToolTip("Son kod değişikliğini geri al")
+        self.undo_btn.setStyleSheet("""
+            QPushButton { color: #8c8c91; background: transparent; border: none; border-radius: 8px; font-size: 13px; }
+            QPushButton:hover { background: rgba(255,255,255,0.06); color: #e8e8e8; }
+        """)
+        self.undo_btn.clicked.connect(self._undo_last_change)
+
         self.pin_btn = QPushButton("📌")
-        self.pin_btn.setFixedSize(26, 26)
-        self.pin_btn.setToolTip("Pencereyi En Üste Sabitle (Şu an: Normal)")
+        self.pin_btn.setFixedSize(28, 28)
+        self.pin_btn.setToolTip("Pencereyi en üste sabitle")
         self.pin_btn.setStyleSheet(self._pin_style(False))
         self.pin_btn.clicked.connect(self._toggle_pin)
 
         min_btn = QPushButton("─")
-        min_btn.setFixedSize(26, 26)
+        min_btn.setFixedSize(28, 28)
         min_btn.setStyleSheet("""
-            QPushButton { color: #7d8590; background: transparent; border: none; border-radius: 13px; font-size: 12px; }
-            QPushButton:hover { background: rgba(255,255,255,0.1); color: #e6edf3; }
+            QPushButton { color: #8c8c91; background: transparent; border: none; border-radius: 8px; font-size: 12px; }
+            QPushButton:hover { background: rgba(255,255,255,0.06); color: #e8e8e8; }
         """)
         min_btn.clicked.connect(self.showMinimized)
 
+        self.max_btn = QPushButton("□")
+        self.max_btn.setFixedSize(28, 28)
+        self.max_btn.setToolTip("Tam ekran / geri al")
+        self.max_btn.setStyleSheet("""
+            QPushButton { color: #8c8c91; background: transparent; border: none; border-radius: 8px; font-size: 12px; }
+            QPushButton:hover { background: rgba(255,255,255,0.06); color: #e8e8e8; }
+        """)
+        self.max_btn.clicked.connect(self._toggle_maximize)
+
         close_btn = QPushButton("✕")
-        close_btn.setFixedSize(26, 26)
+        close_btn.setFixedSize(28, 28)
         close_btn.setStyleSheet("""
-            QPushButton { color: #7d8590; background: transparent; border: none; border-radius: 13px; }
-            QPushButton:hover { background: rgba(248, 81, 73, 0.3); color: #f85149; }
+            QPushButton { color: #8c8c91; background: transparent; border: none; border-radius: 8px; }
+            QPushButton:hover { background: rgba(220, 100, 95, 0.25); color: #dc645f; }
         """)
         close_btn.clicked.connect(self.hide)
 
-        hl.addWidget(dot)
         hl.addWidget(title)
-        hl.addWidget(ver)
         hl.addWidget(self.project_badge)
-        hl.addWidget(sep)
         hl.addWidget(self.model_label)
         hl.addStretch()
         hl.addWidget(self.status_dot)
         hl.addWidget(self.status_text)
-        hl.addSpacing(8)
+        hl.addSpacing(6)
+        hl.addWidget(self.activity_btn)
+        hl.addWidget(self.hack_btn)
+        hl.addWidget(self.undo_btn)
         hl.addWidget(self.pin_btn)
         hl.addWidget(min_btn)
+        hl.addWidget(self.max_btn)
         hl.addWidget(close_btn)
 
         layout.addWidget(header)
+
+    def _toggle_maximize(self):
+        if self.isMaximized():
+            self.showNormal()
+            self.max_btn.setText("□")
+        else:
+            self.showMaximized()
+            self.max_btn.setText("❐")
 
     def _pin_style(self, pinned: bool) -> str:
         color = Colors.ACCENT.name() if pinned else "#7d8590"
@@ -633,6 +734,68 @@ class ChatWindow(QMainWindow):
             QPushButton {{ color: {color}; background: {bg}; border: none; border-radius: 13px; font-size: 11px; }}
             QPushButton:hover {{ background: rgba(255,255,255,0.1); }}
         """
+
+    def _hack_style(self, on: bool) -> str:
+        color = "#ff6b6b" if on else "#7d8590"
+        bg = "rgba(255, 107, 107, 0.18)" if on else "transparent"
+        return f"""
+            QPushButton {{ color: {color}; background: {bg}; border: none; border-radius: 13px; font-size: 12px; }}
+            QPushButton:hover {{ background: rgba(255,255,255,0.1); }}
+        """
+
+    def _toggle_uncensored(self):
+        if not self.uncensored_mode:
+            # Açmadan önce modelin kurulu olduğunu doğrula
+            try:
+                from tenra.plugins._hermes_slot import resolve_uncensored_model
+                resolved = resolve_uncensored_model()
+            except Exception as e:
+                resolved = None
+                self._append_console(f"Model kontrolü başarısız: {e}", "error")
+            if not resolved:
+                msg = (
+                    "⚠ Sansürsüz model Ollama'da bulunamadı.\n"
+                    "Kurulum: `ollama pull uandinotai/dolphin-uncensored` "
+                    "veya `ollama pull hermes3:8b`"
+                )
+                self._add_assistant_message(msg)
+                self._append_console("Hack modu açılamadı: model yok.", "error")
+                return
+            self.uncensored_mode = True
+            self.hack_btn.setStyleSheet(self._hack_style(True))
+            short = resolved.split("/")[-1][:18]
+            self._active_model_label = short
+            self.hack_btn.setToolTip(f"Hack Modu AÇIK → {resolved}")
+            self.model_label.setText(short)
+            if hasattr(self, "_model_chip"):
+                self._model_chip.setText(short)
+            self._append_console(f"Hack/Sansürsüz mod açıldı: {resolved}", "info")
+        else:
+            self.uncensored_mode = False
+            self.hack_btn.setStyleSheet(self._hack_style(False))
+            self._active_model_label = "qwen3:8b"
+            self.hack_btn.setToolTip(f"Hack / Sansürsüz Mod (kapalı) → {UNCENSORED_MODEL or 'model yok'}")
+            self.model_label.setText("qwen3:8b")
+            if hasattr(self, "_model_chip"):
+                self._model_chip.setText("qwen3:8b")
+            self._append_console("Hack modu kapatıldı (qwen3:8b).", "info")
+
+    def _undo_last_change(self):
+        try:
+            from tenra.core.executor import TenraExecutor
+            ws_path = self.active_workspace.get("path") if self.active_workspace else None
+            ex = TenraExecutor(workspace_path=ws_path)
+            if self._last_batch_id:
+                result = ex.undo_batch(self._last_batch_id)
+                self._last_batch_id = None
+            else:
+                result = ex.undo_last_change()
+            ok = result.get("success")
+            msg = result.get("message", "Undo")
+            self._add_tool_card("Undo", msg, bool(ok))
+            self._append_console(msg, "success" if ok else "error")
+        except Exception as e:
+            self._add_tool_card("Undo", str(e), False)
 
     def _toggle_pin(self):
         self.is_pinned = not self.is_pinned
@@ -696,122 +859,212 @@ class ChatWindow(QMainWindow):
             QFrame {{
                 background: {Colors.BG_HEADER.name()};
                 border-top: 1px solid {Colors.BORDER.name()};
-                border-bottom-left-radius: 14px;
+                border-bottom-left-radius: 0;
             }}
         """)
-        il = QHBoxLayout(input_frame)
-        il.setContentsMargins(12, 10, 12, 10)
-        il.setSpacing(8)
+        outer = QVBoxLayout(input_frame)
+        outer.setContentsMargins(20, 12, 20, 16)
+        outer.setSpacing(0)
 
-        self.capture_btn = QPushButton("📷")
-        self.capture_btn.setFixedSize(36, 36)
-        self.capture_btn.setToolTip("Ekran görüntüsü al")
+        # Antigravity tarzı tek pill input
+        pill = QFrame()
+        pill.setStyleSheet(f"""
+            QFrame {{
+                background: {Colors.BG_INPUT.name()};
+                border: 1px solid {Colors.BORDER_LIGHT.name()};
+                border-radius: 22px;
+            }}
+        """)
+        il = QHBoxLayout(pill)
+        il.setContentsMargins(8, 6, 8, 6)
+        il.setSpacing(6)
+
+        self.capture_btn = QPushButton("+")
+        self.capture_btn.setFixedSize(32, 32)
+        self.capture_btn.setToolTip("Ekran görüntüsü / ek")
+        self.capture_btn.setCursor(Qt.PointingHandCursor)
         self.capture_btn.setStyleSheet(f"""
             QPushButton {{
-                background: {Colors.BG_CARD.name()};
+                background: transparent;
                 color: {Colors.TEXT_MUTED.name()};
-                border: 1px solid {Colors.BORDER.name()};
-                border-radius: 10px;
-                font-size: 14px;
+                border: none;
+                border-radius: 16px;
+                font-size: 16px;
             }}
-            QPushButton:hover {{ background: {Colors.BG_CARD2.name()}; color: {Colors.TEXT.name()}; border-color: {Colors.BORDER_LIGHT.name()}; }}
-            QPushButton:disabled {{ opacity: 0.4; }}
+            QPushButton:hover {{ background: {Colors.BG_CARD2.name()}; color: {Colors.TEXT.name()}; }}
         """)
         self.capture_btn.clicked.connect(self._capture_screenshot)
 
         self.attach_btn = QPushButton("📎")
-        self.attach_btn.setFixedSize(36, 36)
+        self.attach_btn.setFixedSize(32, 32)
         self.attach_btn.setToolTip("Fotoğraf yükle")
+        self.attach_btn.setCursor(Qt.PointingHandCursor)
         self.attach_btn.setStyleSheet(f"""
             QPushButton {{
-                background: {Colors.BG_CARD.name()};
+                background: transparent;
                 color: {Colors.TEXT_MUTED.name()};
-                border: 1px solid {Colors.BORDER.name()};
-                border-radius: 10px;
-                font-size: 14px;
+                border: none;
+                border-radius: 16px;
+                font-size: 13px;
             }}
-            QPushButton:hover {{ background: {Colors.BG_CARD2.name()}; color: {Colors.TEXT.name()}; border-color: {Colors.BORDER_LIGHT.name()}; }}
+            QPushButton:hover {{ background: {Colors.BG_CARD2.name()}; color: {Colors.TEXT.name()}; }}
         """)
         self.attach_btn.clicked.connect(self._select_image)
 
         self.voice_btn = QPushButton("🎙️")
-        self.voice_btn.setFixedSize(36, 36)
-        self.voice_btn.setToolTip("Sesle Konuş / Dikte (Ctrl+M veya F4)")
+        self.voice_btn.setFixedSize(32, 32)
+        self.voice_btn.setToolTip("Sesle konuş / dikte")
         self.voice_btn.setStyleSheet(self._voice_btn_style(False))
         self.voice_btn.clicked.connect(self._toggle_voice_listening)
 
+        self.speak_btn = QPushButton("🔊")
+        self.speak_btn.setFixedSize(32, 32)
+        self.speak_btn.setToolTip("Son cevabı Türkçe oku")
+        self.speak_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent;
+                color: {Colors.TEXT_MUTED.name()};
+                border: none;
+                border-radius: 16px;
+                font-size: 13px;
+            }}
+            QPushButton:hover {{ background: {Colors.BG_CARD2.name()}; color: {Colors.TEXT.name()}; }}
+        """)
+        self.speak_btn.clicked.connect(self._toggle_speak_last)
+        self._speaking = False
+
         self.input_field = QLineEdit()
-        self.input_field.setPlaceholderText("Bir şey sor veya görev ver...")
-        self.input_field.setFont(QFont("Segoe UI", 11))
+        self.input_field.setPlaceholderText("Bir şey sor…  @ mention,  / komut")
+        self.input_field.setFont(QFont("Segoe UI", 12))
         self.input_field.setStyleSheet(f"""
             QLineEdit {{
-                background: {Colors.BG_INPUT.name()};
-                border: 1px solid {Colors.BORDER.name()};
-                border-radius: 10px;
-                padding: 9px 18px;
+                background: transparent;
+                border: none;
+                padding: 6px 8px;
                 color: {Colors.TEXT.name()};
-            }}
-            QLineEdit:focus {{
-                border-color: {Colors.ACCENT.name()};
-                background: {Colors.BG_CARD.name()};
             }}
             QLineEdit::placeholder {{ color: {Colors.TEXT_DIM.name()}; }}
         """)
         self.input_field.returnPressed.connect(self._send_message)
 
         self.send_btn = QPushButton("↑")
-        self.send_btn.setFixedSize(36, 36)
-        self.send_btn.setFont(QFont("Segoe UI", 16, QFont.Bold))
+        self.send_btn.setFixedSize(34, 34)
+        self.send_btn.setCursor(Qt.PointingHandCursor)
+        self.send_btn.setFont(QFont("Segoe UI", 14, QFont.Bold))
         self.send_btn.setStyleSheet(f"""
             QPushButton {{
-                background: {Colors.ACCENT.name()};
-                color: #000;
+                background: {Colors.TEXT.name()};
+                color: #111;
                 border: none;
-                border-radius: 10px;
+                border-radius: 17px;
                 font-weight: bold;
             }}
-            QPushButton:hover {{ background: #33deff; }}
+            QPushButton:hover {{ background: #fff; }}
             QPushButton:disabled {{ background: {Colors.BORDER.name()}; color: {Colors.TEXT_DIM.name()}; }}
         """)
         self.send_btn.clicked.connect(self._send_message)
 
         il.addWidget(self.capture_btn)
         il.addWidget(self.attach_btn)
+        il.addWidget(self.input_field, 1)
         il.addWidget(self.voice_btn)
-        il.addWidget(self.input_field)
+        il.addWidget(self.speak_btn)
         il.addWidget(self.send_btn)
 
+        # Model + bağlam kullanımı (sağ alt — Cursor tarzı)
+        meta_row = QHBoxLayout()
+        meta_row.setContentsMargins(12, 6, 12, 0)
+        model_chip = QLabel()
+        self._model_chip = model_chip
+        model_chip.setText(self._active_model_label)
+        model_chip.setStyleSheet(
+            f"color: {Colors.TEXT_DIM.name()}; font-size: 11px; border: none; background: transparent;"
+        )
+        self.context_badge = QLabel("0% bağlam")
+        self.context_badge.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.context_badge.setStyleSheet(
+            f"color: {Colors.TEXT_DIM.name()}; font-size: 11px; border: none; background: transparent;"
+        )
+        self.context_badge.setToolTip("Bu sohbetin bağlam penceresi kullanımı")
+        meta_row.addWidget(model_chip)
+        meta_row.addStretch()
+        meta_row.addWidget(self.context_badge)
+
+        outer.addWidget(pill)
+        outer.addLayout(meta_row)
         layout.addWidget(input_frame)
+        self._update_context_badge()
+
+    def _update_context_badge(self, prompt_eval_count: int | None = None):
+        """Sağ alt bağlam % — aktif sohbet geçmişine göre."""
+        if not hasattr(self, "context_badge"):
+            return
+        try:
+            from tenra.core.context_usage import estimate_context_usage, context_badge_color
+            ws = self.active_workspace or {}
+            info = estimate_context_usage(
+                self.chat_history,
+                workspace_path=ws.get("path"),
+                workspace_name=ws.get("name"),
+                prompt_eval_count=prompt_eval_count,
+            )
+            color = context_badge_color(info["percent"])
+            self.context_badge.setText(f"{info['percent']}% · {info['detail']}")
+            self.context_badge.setToolTip(info["tooltip"])
+            self.context_badge.setStyleSheet(
+                f"color: {color}; font-size: 11px; border: none; background: transparent;"
+            )
+        except Exception:
+            self.context_badge.setText("?— bağlam")
 
     # ── MESSAGE RENDERING ──────────────────────────
 
     def _add_user_message(self, text: str):
         import html as html_mod
         safe = html_mod.escape(text).replace("\n", "<br>")
+        # Tablo hücresi → balon metin kadar genişler (tam satır çizgisi yok)
         html = (
-            f'<div style="display:flex;justify-content:flex-end;margin:10px 0;">'
-            f'<div style="max-width:85%;background:{Colors.BG_CARD2.name()};'
-            f'border:1px solid {Colors.BORDER.name()};border-left:3px solid {Colors.ACCENT.name()};'
-            f'border-radius:10px;padding:10px 16px;color:{Colors.TEXT.name()};'
-            f'font-family:Segoe UI,Arial;font-size:13px;">{safe}</div>'
-            f'</div>'
+            f'<table cellspacing="0" cellpadding="0" style="margin:14px 0 8px 0;border-collapse:collapse;">'
+            f'<tr><td style="background:{Colors.BG_CARD2.name()};'
+            f'border:1px solid {Colors.BORDER.name()};border-radius:12px;'
+            f'padding:10px 14px;color:{Colors.TEXT.name()};'
+            f'font-family:Segoe UI,system-ui;font-size:14px;line-height:1.5;">'
+            f'{safe}</td></tr></table>'
         )
         self.chat_display.append(html)
         self._scroll_bottom()
 
     def _add_assistant_message(self, text: str):
         body = markdown_to_html(text)
+        speak_link = ""
+        if TTS_ENABLED and text and not text.startswith("⚠") and not text.startswith("Hata"):
+            speak_link = (
+                f'<div style="margin-top:8px;">'
+                f'<a href="action://speak" title="Türkçe oku" '
+                f'style="color:{Colors.TEXT_DIM.name()};text-decoration:none;font-size:12px;">🔊 Dinle</a>'
+                f'</div>'
+            )
+            self._last_speakable = text
         html = (
-            f'<div style="margin:10px 0;padding-right:40px;">'
-            f'<div style="display:inline-flex;align-items:center;gap:6px;margin-bottom:6px;">'
-            f'<span style="color:{Colors.ACCENT.name()};font-size:9px;">●</span>'
-            f'<span style="color:{Colors.TEXT_DIM.name()};font-size:10px;font-family:Consolas;">Tenra</span>'
-            f'</div>'
-            f'<div style="color:{Colors.TEXT.name()};font-family:Segoe UI,Arial;font-size:13px;line-height:1.6;">{body}</div>'
+            f'<div style="margin:8px 0 20px 0;padding:4px 2px;">'
+            f'<div style="color:{Colors.TEXT.name()};font-family:Segoe UI,system-ui;'
+            f'font-size:14.5px;line-height:1.65;">{body}</div>'
+            f'{speak_link}'
             f'</div>'
         )
         self.chat_display.append(html)
         self._scroll_bottom()
+
+    def _stream_bubble_html(self, preview: str) -> str:
+        import html as html_mod
+        safe = html_mod.escape(preview).replace("\n", "<br>")
+        return (
+            f'<div style="margin:8px 0 20px 0;padding:4px 2px;">'
+            f'<div style="color:{Colors.TEXT.name()};font-family:Segoe UI,system-ui;'
+            f'font-size:14.5px;line-height:1.65;">'
+            f'{safe}<span style="color:{Colors.TEXT_MUTED.name()};">▍</span></div>'
+            f'</div>'
+        )
 
     def _add_tool_card(self, func_name: str, result: str, success: bool = True):
         html = make_tool_card_html(func_name, result, success)
@@ -922,24 +1175,26 @@ class ChatWindow(QMainWindow):
             import html as html_mod
             display_html += html_mod.escape(text).replace("\n", "<br>")
 
+        # Görsel + metin: yine metin kadar balon (tam genişlik yok)
         self._add_html(
-            f'<div style="display:flex;justify-content:flex-end;margin:10px 0;">'
-            f'<div style="max-width:85%;background:{Colors.BG_CARD2.name()};'
-            f'border:1px solid {Colors.BORDER.name()};border-left:3px solid {Colors.ACCENT.name()};'
-            f'border-radius:10px;padding:10px 16px;color:{Colors.TEXT.name()};'
-            f'font-family:Segoe UI,Arial;font-size:13px;">{display_html}</div>'
-            f'</div>'
+            f'<table cellspacing="0" cellpadding="0" style="margin:14px 0 8px 0;border-collapse:collapse;">'
+            f'<tr><td style="background:{Colors.BG_CARD2.name()};'
+            f'border:1px solid {Colors.BORDER.name()};border-radius:12px;'
+            f'padding:10px 14px;color:{Colors.TEXT.name()};'
+            f'font-family:Segoe UI,system-ui;font-size:14px;line-height:1.5;">'
+            f'{display_html}</td></tr></table>'
         )
         self.input_field.clear()
         self._set_busy(True)
 
         self._append_console(f"Kullanıcı: {text if text else '[Görsel Gönderildi]'}", "user")
         self.chat_history.append({"role": "user", "content": text})
+        self._update_context_badge()
         if self.active_conversation:
             self.wm.save_conversation_messages(self.active_conversation["id"], self.chat_history)
             self.sidebar.refresh()
 
-        uncensored = False
+        uncensored = self.uncensored_mode
         ws_path = self.active_workspace.get("path") if self.active_workspace else None
         self._worker = LLMWorker(
             text,
@@ -954,6 +1209,8 @@ class ChatWindow(QMainWindow):
         self._worker.tool_approval_requested.connect(self._on_tool_approval_requested)
         self._worker.tool_started.connect(self._on_tool_started)
         self._worker.terminal_output.connect(self._on_terminal_output)
+        self._worker.token_received.connect(self._on_token_received)
+        self._worker.stream_reset.connect(self._on_stream_reset)
         self._worker.start()
 
         self.preview_frame.hide()
@@ -967,6 +1224,8 @@ class ChatWindow(QMainWindow):
         self.capture_btn.setEnabled(not busy)
         if hasattr(self, "voice_btn"):
             self.voice_btn.setEnabled(not busy)
+        if hasattr(self, "speak_btn"):
+            self.speak_btn.setEnabled(not busy)
         self.preview_close_btn.setEnabled(not busy)
         if busy:
             self.loading_bar.show()
@@ -975,8 +1234,9 @@ class ChatWindow(QMainWindow):
         else:
             self.loading_bar.hide()
             self.tool_label.hide()
+            self._on_stream_reset()
             self.status_dot.setStyleSheet(f"color: {Colors.ACCENT_GREEN.name()}; font-size: 8px; background: transparent; border: none;")
-            self.status_text.setText("Aktif")
+            self.status_text.setText("Hazır")
             self.input_field.setFocus()
 
     def _on_tool_started(self, func_name: str):
@@ -995,7 +1255,7 @@ class ChatWindow(QMainWindow):
         label = labels.get(func_name, f"⚙ {func_name} çalışıyor")
         self.tool_label.setText(label + "...")
         self.tool_label.show()
-        self.model_label.setText(f"qwen3:8b · {func_name}")
+        self.model_label.setText(f"{self._active_model_label} · {func_name}")
         self._append_console(f"⚙ Başlatılıyor: {func_name}", "tool")
 
     def _on_tool_executed(self, func_name: str, result: str, success: bool):
@@ -1011,9 +1271,76 @@ class ChatWindow(QMainWindow):
         if stderr:
             self._append_console(stderr[:200], "error")
 
+    def _on_token_received(self, token: str):
+        """Ollama stream delta → sohbet içinde canlı daktilo."""
+        if not token:
+            return
+        if not self._stream_started:
+            # Snapshot: tool kartları vb. korunur, üzerine stream balonu yazılır
+            self._pre_stream_html = self.chat_display.toHtml()
+            self._stream_started = True
+            if not self._stream_flush_timer.isActive():
+                self._stream_flush_timer.start()
+        self._stream_buffer += token
+        self._stream_dirty = True
+        self.status_text.setText("Yazıyor")
+        self.status_dot.setStyleSheet(
+            f"color: {Colors.ACCENT.name()}; font-size: 8px; background: transparent; border: none;"
+        )
+
+    def _flush_stream_ui(self):
+        """40ms'de bir stream balonunu yenile (akıcı, seyrek değil)."""
+        if not self._stream_dirty or not self._stream_started:
+            return
+        self._stream_dirty = False
+        preview = self._stream_buffer
+        if len(preview) > 6000:
+            preview = "…\n" + preview[-5600:]
+        base = self._pre_stream_html or ""
+        # Qt toHtml body'sini koruyup sonuna stream eklemek için setHtml
+        # En güvenlisi: öncesi + stream balonu
+        try:
+            # toHtml tam belge döner; stream balonunu body sonuna eklemek için
+            # basit yol: ön HTML'i tut, üzerine append benzeri birleştir
+            if "</body>" in base.lower():
+                # case-insensitive split
+                idx = base.lower().rfind("</body>")
+                combined = base[:idx] + self._stream_bubble_html(preview) + base[idx:]
+            else:
+                combined = base + self._stream_bubble_html(preview)
+            # Scroll konumunu koru / alta yapış
+            bar = self.chat_display.verticalScrollBar()
+            at_bottom = bar.value() >= bar.maximum() - 40
+            self.chat_display.setHtml(combined)
+            if at_bottom:
+                bar.setValue(bar.maximum())
+        except Exception:
+            pass
+
+    def _on_stream_reset(self):
+        """Araç çağrısı / bitiş: yarım stream metnini temizle."""
+        self._stream_flush_timer.stop()
+        self._stream_dirty = False
+        was_streaming = self._stream_started
+        self._stream_buffer = ""
+        self._stream_started = False
+        if was_streaming and self._pre_stream_html is not None:
+            try:
+                self.chat_display.setHtml(self._pre_stream_html)
+            except Exception:
+                pass
+        self._pre_stream_html = None
+
     def _on_response(self, message: str, func_info: str):
+        # Stream temizliği _set_busy(False) içinde (tek kaynak)
         self._set_busy(False)
-        self.model_label.setText("qwen3:8b")
+        self.model_label.setText(self._active_model_label)
+        if hasattr(self, "_model_chip"):
+            self._model_chip.setText(self._active_model_label)
+
+        pec = None
+        if hasattr(self, "_worker") and self._worker is not None:
+            pec = getattr(self._worker, "last_prompt_eval", None)
 
         if isinstance(message, str) and message.startswith("__CONFIRM_DELETE__"):
             target = message.replace("__CONFIRM_DELETE__", "", 1)
@@ -1027,7 +1354,27 @@ class ChatWindow(QMainWindow):
             self.wm.save_conversation_messages(self.active_conversation["id"], self.chat_history)
             self.sidebar.refresh()
         self._add_assistant_message(message)
+        self._update_context_badge(prompt_eval_count=pec)
         self._append_console("Cevap hazırlandı ve iletildi.", "info")
+
+        # Son batch uygulandıysa undo linki göster
+        if self._last_batch_id:
+            self._add_html(
+                f'<div style="margin:4px 0 10px 0;">'
+                f'<a href="action://undo_batch?id={self._last_batch_id}" '
+                f'style="color:{Colors.ACCENT.name()};font-size:12px;">↩ Bu değişiklik paketini geri al</a>'
+                f'</div>'
+            )
+
+        # Otomatik TTS kapalı — yalnızca TTS_AUTO_SPEAK True ise (varsayılan False)
+        if TTS_AUTO_SPEAK and TTS_ENABLED and message and not message.startswith("⚠") and not message.startswith("Hata"):
+            plain = message.strip()
+            if len(plain) <= 280 and "```" not in plain:
+                try:
+                    from tenra.voice.tts import speak
+                    speak(plain)
+                except Exception:
+                    pass
 
     def _on_tool_approval_requested(self, func_name: str, params_str: str):
         import html as html_mod
@@ -1038,6 +1385,32 @@ class ChatWindow(QMainWindow):
             params = json.loads(params_str)
         except Exception:
             params = {"raw": params_str}
+
+        # Case 0: Çoklu dosya diff paketi
+        if func_name == "diff_batch" and params.get("files"):
+            files = params.get("files") or []
+            if files:
+                count = params.get("count", len(files))
+                batch_id = params.get("batch_id", "")
+                self._pending_batch_id = batch_id
+                multi = make_multi_diff_card_html(files)
+                html = (
+                    f'<div style="background:{Colors.BG_CARD.name()};border:1px solid {Colors.ACCENT.name()};'
+                    f'border-radius:10px;padding:14px;margin:10px 0;">'
+                    f'<div style="color:{Colors.ACCENT.name()};font-weight:bold;font-size:13px;margin-bottom:8px;">'
+                    f'📦 Çoklu Dosya Diff Paketi ({count} dosya)</div>'
+                    f'<div style="margin-bottom:12px;">{multi}</div>'
+                    f'<div>'
+                    f'<a href="action://approve_tool" style="background:{Colors.ACCENT_GREEN.name()};color:#000;padding:7px 18px;'
+                    f'text-decoration:none;border-radius:6px;font-weight:bold;font-size:12px;margin-right:10px;">✓ Paketi Onayla ve Uygula</a>'
+                    f'<a href="action://deny_tool" style="background:{Colors.ACCENT_RED.name()};color:#fff;padding:7px 18px;'
+                    f'text-decoration:none;border-radius:6px;font-weight:bold;font-size:12px;">✕ Paketi Reddet</a>'
+                    f'</div>'
+                    f'</div>'
+                )
+                self._add_html(html)
+                self._append_console(f"📦 Diff paketi onayı: {count} dosya", "info")
+                return
 
         # Case 1: Kod Diff Önizleme Onayı (patch / write)
         if "diff" in params and params["diff"]:
@@ -1130,6 +1503,9 @@ class ChatWindow(QMainWindow):
         if url_str == "action://approve_tool":
             if hasattr(self, "_worker") and self._worker and self._worker.isRunning():
                 self._worker.tool_approval_result = True
+                if getattr(self, "_pending_batch_id", None):
+                    self._last_batch_id = self._pending_batch_id
+                    self._pending_batch_id = None
                 self._add_tool_card("Onay", "İzin verildi, devam ediliyor...", True)
                 self._append_console("Kullanıcı eyleme izin verdi.", "success")
             return
@@ -1137,9 +1513,26 @@ class ChatWindow(QMainWindow):
         if url_str == "action://deny_tool":
             if hasattr(self, "_worker") and self._worker and self._worker.isRunning():
                 self._worker.tool_approval_result = False
+                self._pending_batch_id = None
                 self._add_tool_card("Onay", "İşlem reddedildi.", False)
                 self._append_console("Kullanıcı eylemi reddetti.", "error")
-                self._set_busy(False)
+                # Busy'yi burada açma — worker hâlâ çalışıyor; _on_response temizler
+            return
+
+        if url_str == "action://undo_last":
+            self._undo_last_change()
+            return
+
+        if url_str.startswith("action://undo_batch"):
+            # action://undo_batch?id=xxx or action://undo_batch/xxx
+            batch_id = ""
+            if "?" in url_str:
+                batch_id = url_str.split("id=")[-1]
+            elif "/" in url_str:
+                batch_id = url_str.rstrip("/").split("/")[-1]
+            if batch_id and batch_id != "undo_batch":
+                self._last_batch_id = batch_id
+            self._undo_last_change()
             return
 
         if url_str == "action://approve_pending":
@@ -1148,6 +1541,10 @@ class ChatWindow(QMainWindow):
 
         if url_str == "action://deny_pending":
             self._handle_pending_confirmation(False)
+            return
+
+        if url_str == "action://speak":
+            self._speak_text(self._last_speakable)
             return
 
         QDesktopServices.openUrl(QUrl(url_str))
@@ -1190,28 +1587,90 @@ class ChatWindow(QMainWindow):
             self._action_worker.start()
 
     # ── SESLİ KONUŞMA (VOICE / STT) ────────────────
+    def _plain_for_speech(self, text: str) -> str:
+        """Markdown/kod bloklarını ses için sadeleştir."""
+        if not text:
+            return ""
+        plain = re.sub(r"```[\s\S]*?```", " ", text)
+        plain = re.sub(r"`([^`]+)`", r"\1", plain)
+        plain = re.sub(r"[#*_>\[\]()]+", " ", plain)
+        plain = re.sub(r"\s+", " ", plain).strip()
+        return plain[:800]
+
+    def _speak_text(self, text: str):
+        if not TTS_ENABLED:
+            self._append_console("TTS kapalı.", "info")
+            return
+        plain = self._plain_for_speech(text)
+        if not plain:
+            self._append_console("Okunacak metin yok.", "info")
+            return
+        try:
+            from tenra.voice.tts import get_synthesizer, speak, stop_speaking
+            synth = get_synthesizer()
+            if not synth.available:
+                self._append_console(
+                    "Yerel Türkçe TTS yok. data/piper altına onnx koy "
+                    "veya ileride ses klonunu bağla.",
+                    "error",
+                )
+                return
+            if self._speaking:
+                stop_speaking()
+                self._speaking = False
+                self.speak_btn.setText("🔊")
+                return
+            ok = speak(plain)
+            if ok:
+                self._speaking = True
+                self.speak_btn.setText("⏹")
+                # Konuşma bitince ikonu geri al (kabaca süre)
+                delay_ms = min(120_000, max(3000, len(plain) * 80))
+                QTimer.singleShot(delay_ms, self._reset_speak_btn)
+                self._append_console(f"TTS ({synth.backend_name}): okunuyor…", "info")
+            else:
+                self._append_console("TTS başlatılamadı.", "error")
+        except Exception as e:
+            self._append_console(f"TTS hata: {e}", "error")
+
+    def _reset_speak_btn(self):
+        self._speaking = False
+        if hasattr(self, "speak_btn"):
+            self.speak_btn.setText("🔊")
+
+    def _toggle_speak_last(self):
+        """Input bar hoparlör: son cevabı oku / durdur."""
+        if self._speaking:
+            try:
+                from tenra.voice.tts import stop_speaking
+                stop_speaking()
+            except Exception:
+                pass
+            self._reset_speak_btn()
+            return
+        self._speak_text(self._last_speakable)
+
     def _voice_btn_style(self, listening: bool) -> str:
         if listening:
             return f"""
                 QPushButton {{
                     background: {Colors.ACCENT_RED.name()};
                     color: #ffffff;
-                    border: 1px solid {Colors.ACCENT_RED.name()};
-                    border-radius: 10px;
-                    font-size: 14px;
-                    font-weight: bold;
+                    border: none;
+                    border-radius: 16px;
+                    font-size: 13px;
                 }}
-                QPushButton:hover {{ background: #ff4d4d; }}
+                QPushButton:hover {{ background: #e0706a; }}
             """
         return f"""
             QPushButton {{
-                background: {Colors.BG_CARD.name()};
+                background: transparent;
                 color: {Colors.TEXT_MUTED.name()};
-                border: 1px solid {Colors.BORDER.name()};
-                border-radius: 10px;
-                font-size: 14px;
+                border: none;
+                border-radius: 16px;
+                font-size: 13px;
             }}
-            QPushButton:hover {{ background: {Colors.BG_CARD2.name()}; color: {Colors.TEXT.name()}; border-color: {Colors.BORDER_LIGHT.name()}; }}
+            QPushButton:hover {{ background: {Colors.BG_CARD2.name()}; color: {Colors.TEXT.name()}; }}
             QPushButton:disabled {{ opacity: 0.4; }}
         """
 

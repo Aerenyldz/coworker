@@ -32,8 +32,9 @@ def markdown_to_html(text: str) -> str:
         code = match.group(1)
         ph = f"___INLINE_{len(inline_codes)}___"
         inline_codes.append(
-            f'<code style="font-family:Consolas,monospace;background:{Colors.BG_CARD2.name()};'
-            f'color:{Colors.ACCENT_PURPLE.name()};padding:2px 6px;border-radius:4px;font-size:12px;">'
+            f'<code style="font-family:Consolas,monospace;'
+            f'background:rgba(255,255,255,0.06);'
+            f'color:#c9a0a0;padding:1px 5px;border-radius:3px;font-size:13px;">'
             f'{code}</code>'
         )
         return ph
@@ -46,7 +47,15 @@ def markdown_to_html(text: str) -> str:
     for i, line in enumerate(lines):
         m = re.match(r"^(\s*)[-\*]\s+(.+)$", line)
         if m:
-            lines[i] = f'{m.group(1)}<span style="color:{Colors.ACCENT.name()};">▸</span> {m.group(2)}'
+            lines[i] = f'{m.group(1)}<span style="color:{Colors.TEXT_MUTED.name()};">•</span> {m.group(2)}'
+        hm = re.match(r"^(#{1,3})\s+(.+)$", line)
+        if hm:
+            level = len(hm.group(1))
+            size = {1: 17, 2: 15, 3: 14}.get(level, 14)
+            lines[i] = (
+                f'<div style="font-size:{size}px;font-weight:600;color:{Colors.TEXT.name()};'
+                f'margin:14px 0 6px 0;">{hm.group(2)}</div>'
+            )
     processed = "\n".join(lines)
 
     processed = processed.replace("\n", "<br>")
@@ -150,3 +159,15 @@ def make_diff_card_html(filename: str, diff_text: str) -> str:
         f'<div>{rows}</div>'
         f'</div>'
     )
+
+
+def make_multi_diff_card_html(files: list) -> str:
+    """Birden fazla dosya için paket diff kartı."""
+    parts = []
+    for f in files[:8]:
+        fname = f.get("filename") or f.get("path") or "Dosya"
+        parts.append(make_diff_card_html(fname, f.get("diff") or ""))
+    extra = ""
+    if len(files) > 8:
+        extra = f'<div style="color:{Colors.TEXT_MUTED.name()};font-size:11px;padding:6px 0;">… +{len(files)-8} dosya daha</div>'
+    return "".join(parts) + extra

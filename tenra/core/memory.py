@@ -1,9 +1,7 @@
-"""Tenra 2.0 — Persistent Episodic & Project Memory System
+"""Tenra 2.0 — Persistent Episodic & Semantic Memory System
 
-Kullanıcı tercihlerini, proje mimari notlarını ve çözülen görevlerin özetlerini
-data/memory.json dosyasında kalıcı olarak saklar.
-Sistem her çalıştığında bu hafızayı LLM sistem prompt'una kompakt şekilde enjekte eder.
-Böylece Tenra kullandıkça öğrenir, hatırlar ve gelişir.
+JSON (preferences/projects/episodes) + SQLite-vec anlamsal arama.
+Kullanıcı sorgusuna en yakın 3 geçmiş deneyim / kod parçacığı prompt'a enjekte edilir.
 """
 
 from __future__ import annotations
@@ -16,10 +14,25 @@ from typing import Dict, List, Optional, Any
 
 
 class MemoryStore:
-    def __init__(self, memory_file: Path):
+    def __init__(self, memory_file: Path, vector_db_path: Path = None):
         self.memory_file = Path(memory_file)
         self.memory_file.parent.mkdir(parents=True, exist_ok=True)
         self.data: Dict[str, Any] = self._load()
+        self._vector = None
+        self._vector_db_path = vector_db_path
+        self._migrated = False
+
+    def _get_vector(self):
+        if self._vector is None and self._vector_db_path is not None:
+            try:
+                from .vector_store import VectorStore
+                self._vector = VectorStore(self._vector_db_path)
+                if not self._migrated:
+                    self._migrate_episodes_to_vector()
+                    self._migrated = True
+            except Exception:
+                self._vector = None
+        return self._vector
 
     def _default_data(self) -> Dict[str, Any]:
         return {
@@ -55,7 +68,6 @@ class MemoryStore:
             try:
                 with open(self.memory_file, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                    # Eksik anahtarları tamamla
                     defaults = self._default_data()
                     for k, v in defaults.items():
                         if k not in data:
@@ -63,7 +75,7 @@ class MemoryStore:
                     return data
             except Exception:
                 pass
-        
+
         defaults = self._default_data()
         self._save(defaults)
         return defaults
@@ -74,6 +86,29 @@ class MemoryStore:
         try:
             with open(self.memory_file, "w", encoding="utf-8") as f:
                 json.dump(self.data, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+    def _migrate_episodes_to_vector(self):
+        """Mevcut JSON episode'larını vektör DB'ye bir kez aktar."""
+        vec = self._vector
+        if vec is None:
+            return
+        try:
+            if vec.count("episode") > 0:
+                return
+            for ep in self.data.get("episodes", []):
+                text = f"{ep.get('query', '')}: {ep.get('summary', '')}".strip()
+                if not text or text == ":":
+                    continue
+                dedupe = f"episode:{ep.get('date','')}:{ep.get('query','')[:40]}"
+                vec.upsert(
+                    kind="episode",
+                    text=text,
+                    workspace=ep.get("workspace", ""),
+                    meta={"date": ep.get("date"), "source": "json_migrate"},
+                    dedupe_key=dedupe,
+                )
         except Exception:
             pass
 
@@ -114,24 +149,43 @@ class MemoryStore:
             "summary": summary[:120]
         }
         self.data.setdefault("episodes", []).append(episode)
-        # Son 25 kayıt ile sınırla
-        if len(self.data["episodes"]) > 25:
-            self.data["episodes"] = self.data["episodes"][-25:]
+        # JSON'da son 100 kayıt (vektör DB uzun vadeli arşiv)
+        if len(self.data["episodes"]) > 100:
+            self.data["episodes"] = self.data["episodes"][-100:]
         self._save()
 
-    def get_memory_summary(self, workspace_path: str, max_chars: int = 2000) -> str:
-        """Sistem prompt'u için çalışma alanına özel ve genel hafıza özetini çıkarır."""
+        # Anlamsal indeks
+        vec = self._get_vector()
+        if vec is not None:
+            try:
+                text = f"{episode['query']}: {episode['summary']}"
+                dedupe = f"episode:{episode['date']}:{episode['query'][:40]}"
+                vec.upsert(
+                    kind="episode",
+                    text=text,
+                    workspace=workspace_name,
+                    meta={"date": episode["date"], "source": "auto_learn"},
+                    dedupe_key=dedupe,
+                )
+            except Exception:
+                pass
+
+    def get_memory_summary(
+        self,
+        workspace_path: str,
+        max_chars: int = 2000,
+        query: str = None,
+    ) -> str:
+        """Sistem prompt'u için çalışma alanına özel + anlamsal hafıza özeti."""
         lines: List[str] = []
         lines.append("🧠 KALICI HAFIZA VE ÖĞRENİLENLER:")
 
-        # 1. Kullanıcı Tercihleri
         prefs = self.data.get("preferences", [])
         if prefs:
             lines.append("📌 Genel Tercihler:")
             for p in prefs[:4]:
                 lines.append(f"  • {p}")
 
-        # 2. Bu Projeye Özel Hafıza
         ws_name = Path(workspace_path).resolve().name.lower()
         projects = self.data.get("projects", {})
         proj_data = projects.get(ws_name)
@@ -144,14 +198,30 @@ class MemoryStore:
             for note in proj_data.get("notes", [])[:5]:
                 lines.append(f"  • {note}")
 
-        # 3. Son Çözülen Görevler (Episodik Hafıza)
-        episodes = self.data.get("episodes", [])
-        if episodes:
-            lines.append("📌 Son Hafıza Kayıtları (Önceki Görevler):")
-            # En güncelden geriye doğru son 4 kayıt
-            for ep in reversed(episodes[-4:]):
-                ws_tag = f"[{ep.get('workspace', '')}] " if ep.get('workspace') else ""
-                lines.append(f"  • {ws_tag}{ep.get('query')}: {ep.get('summary')}")
+        # Anlamsal RAG: sorguya en yakın 3 episode (+ kod parçası)
+        semantic_added = False
+        vec = self._get_vector()
+        if vec is not None and query:
+            try:
+                hits = vec.search(query, top_k=3, workspace=ws_name)
+                if hits:
+                    lines.append("📌 Anlamsal Hafıza (sorguna en yakın deneyimler):")
+                    for h in hits:
+                        score = h.get("score", 0)
+                        kind = h.get("kind", "episode")
+                        tag = "kod" if kind == "code" else "deneyim"
+                        lines.append(f"  • [{tag} · {score:.2f}] {h.get('text', '')[:160]}")
+                    semantic_added = True
+            except Exception:
+                pass
+
+        if not semantic_added:
+            episodes = self.data.get("episodes", [])
+            if episodes:
+                lines.append("📌 Son Hafıza Kayıtları (Önceki Görevler):")
+                for ep in reversed(episodes[-4:]):
+                    ws_tag = f"[{ep.get('workspace', '')}] " if ep.get('workspace') else ""
+                    lines.append(f"  • {ws_tag}{ep.get('query')}: {ep.get('summary')}")
 
         result = "\n".join(lines)
         if len(result) > max_chars:
@@ -169,8 +239,7 @@ class MemoryStore:
         for tr in tool_results:
             name = tr.get("name", "")
             args = tr.get("args", {})
-            res = tr.get("result", {})
-            
+
             if name == "file":
                 action = args.get("action", "")
                 p = args.get("path", "")
@@ -188,3 +257,11 @@ class MemoryStore:
         if actions_taken:
             summary = ", ".join(actions_taken[:3])
             self.add_episode(ws_name, user_input, summary)
+
+    def close(self):
+        if self._vector is not None:
+            try:
+                self._vector.close()
+            except Exception:
+                pass
+            self._vector = None

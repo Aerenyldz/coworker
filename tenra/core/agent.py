@@ -22,7 +22,6 @@ from typing import Any, Dict, List, Tuple
 import requests
 
 from ..config import (
-    SYSTEM_PROMPT,
     MAIN_MODEL,
     VISION_MODEL,
     OLLAMA_URL,
@@ -32,6 +31,7 @@ from ..config import (
     APP_VERSION,
     get_system_prompt,
     MEMORY_FILE,
+    VECTOR_DB_FILE,
 )
 from .llm_backend import OllamaBackend
 from .memory import MemoryStore
@@ -202,6 +202,13 @@ def _normalize_tool_args(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
             else:
                 args["action"] = "list"
 
+    # shell: timeout string → int
+    if name == "shell" and "timeout" in args:
+        try:
+            args["timeout"] = int(args["timeout"])
+        except (TypeError, ValueError):
+            args.pop("timeout", None)
+
     return args
 
 
@@ -267,13 +274,61 @@ def is_informational_or_analysis_query(text: str) -> bool:
     return is_q and not is_act
 
 
+def should_enable_think(user_input: str, step: int = 0, has_tool_results: bool = False) -> bool:
+    """Hibrit think: derin planlama/analiz için True, tek adımlı eylem için False.
+
+    - Explicit /think → True, /nothink → False
+    - Araç sonuçları sonrası özet adımlarında False (hız)
+    - Mimari/refactor/algoritma/analiz kalıplarında True
+    - Bilgi/analiz sorularında (ilk adım) True
+    - Doğrudan eylem komutlarında False
+    """
+    if not user_input:
+        return False
+
+    lowered = user_input.lower().strip()
+
+    if re.search(r"(?:^|\s)/nothink\b", lowered) or re.search(r"\bno[-\s]?think\b", lowered):
+        return False
+
+    # Tool sonuçlarından sonra / özet adımlarında think kapalı (hız)
+    if has_tool_results or step > 0:
+        return False
+
+    if re.search(r"(?:^|\s)/think\b", lowered) or re.search(r"\bdeep[-\s]?think\b", lowered):
+        return True
+
+    deep_patterns = [
+        r"\brefactor\b", r"\bmimari\b", r"\barchitecture\b",
+        r"\balgoritma\b", r"\balgorithm\b", r"\btasarım\b", r"\bdesign\b",
+        r"\bplanla\b", r"\bplan\s+yap\b", r"\bkar[sş][iı]la[sş]t[iı]r\b",
+        r"\boptimiz\w*\b", r"\bdebug\b", r"\bk[oö]k\s+neden\b",
+        r"\bderin\s+analiz\b", r"\bad[iı]m\s+ad[iı]m\b",
+        r"\bcok\s+ad[iı]ml[iı]\b", r"\bçok\s+adımlı\b",
+    ]
+    if any(re.search(pat, lowered) for pat in deep_patterns):
+        return True
+
+    action_patterns = [
+        r'\b(uygulamas[iı]n[iı]|program[iı]n[iı]|app)\s+(a[cç]|ba[sş]lat)\b',
+        r'^(a[cç]|ba[sş]lat|calistir|çalıştır|sil|yarat|olu[sş]tur|oku|listele|yaz)\b',
+        r'\b(a[cç]|ba[sş]lat|calistir|çalıştır|sil|yarat|olu[sş]tur|oku|listele)$',
+        r'\bkomut:\b', r'\bpowershell:\b', r'\bterminal:\b',
+        r'\bfile\b', r'\bshell\b', r'\bpatch\b',
+    ]
+    if any(re.search(pat, lowered) for pat in action_patterns):
+        return False
+
+    return is_informational_or_analysis_query(user_input)
+
+
 # ═══════════════════════════════════════════════
 # MAIN AGENT TOOL LOOP
 # ═══════════════════════════════════════════════
 
 def _record_run_memory(ws_path: str, user_input: str, tool_results: list, reply: str):
     try:
-        store = MemoryStore(MEMORY_FILE)
+        store = MemoryStore(MEMORY_FILE, vector_db_path=VECTOR_DB_FILE)
         store.auto_learn_from_agent_run(ws_path, user_input, tool_results, reply)
     except Exception:
         pass
@@ -282,14 +337,55 @@ def run_agent_loop(
     user_input: str,
     executor: Any,
     chat_history: list = None,
+    on_token=None,
+    on_stream_reset=None,
+    uncensored: bool = False,
 ) -> Dict[str, Any]:
-    """Qwen3 çok adımlı araç çağırma döngüsü."""
+    """Qwen3 çok adımlı araç çağırma döngüsü.
+
+    on_token: streaming content delta callback (str -> None)
+    on_stream_reset: araç çağrısı başladığında UI stream buffer temizliği
+    uncensored: Hermes/Dolphin sansürsüz model slotunu aç
+    """
 
     backend = OllamaBackend(OLLAMA_URL, MAIN_MODEL)
 
+    # Model seçimi (Hack / Uncensored slot)
+    try:
+        from ..plugins._hermes_slot import (
+            hermes_system_addon,
+            is_uncensored_request,
+            resolve_uncensored_model,
+        )
+        use_uncensored = bool(uncensored) or is_uncensored_request(user_input)
+        if use_uncensored:
+            resolved = resolve_uncensored_model()
+            if not resolved:
+                return {
+                    "ok": False,
+                    "reply": "",
+                    "tool_results": [],
+                    "error": (
+                        "Sansürsüz model Ollama'da bulunamadı. "
+                        "Örn: ollama pull uandinotai/dolphin-uncensored  veya  ollama pull hermes3:8b"
+                    ),
+                    "model": None,
+                }
+            active_model = resolved
+        else:
+            active_model = MAIN_MODEL
+    except Exception:
+        active_model = MAIN_MODEL
+        use_uncensored = False
+
     ws_path = getattr(executor, "workspace_path", DESKTOP_PATH)
     ws_name = getattr(executor, "workspace_name", "Masaüstü")
-    system_prompt = get_system_prompt(ws_path, ws_name)
+    system_prompt = get_system_prompt(ws_path, ws_name, query=user_input)
+    if use_uncensored and active_model != MAIN_MODEL:
+        try:
+            system_prompt = system_prompt + hermes_system_addon()
+        except Exception:
+            pass
 
     messages: List[Dict[str, Any]] = [
         {"role": "system", "content": system_prompt},
@@ -298,8 +394,11 @@ def run_agent_loop(
     if chat_history:
         optimized = optimize_chat_history(chat_history)
         messages.extend(optimized)
-        if not messages or messages[-1].get("content") != user_input:
+        if not messages or messages[-1].get("role") != "user":
             messages.append({"role": "user", "content": user_input})
+        elif messages[-1].get("content") != user_input:
+            # Aynı tur: vision/zenginleştirilmiş metinle güncelle (çift user turn yok)
+            messages[-1] = {**messages[-1], "content": user_input}
     else:
         messages.append({"role": "user", "content": user_input})
 
@@ -307,12 +406,55 @@ def run_agent_loop(
     tools = executor.get_tool_schemas()
 
     for step in range(MAX_TOOL_STEPS):
+        # Sansürsüz modeller (dolphin/hermes) think desteklemez → kapalı tut
+        enable_think = False if use_uncensored else should_enable_think(
+            user_input, step=step, has_tool_results=bool(tool_results)
+        )
+        # Streaming: final metin adımlarında; tool-ağırlıklı adımlarda da açık
+        # (UI tool_calls gelince on_stream_reset ile temizler)
+        token_cb = on_token if callable(on_token) else None
+
         response = backend.chat(
             messages=messages,
             tools=tools,
-            model=MAIN_MODEL,
+            model=active_model,
             temperature=0.3,
+            think=enable_think,
+            on_token=token_cb,
         )
+
+        # Stream+tools uyumsuzluğunda bir kez non-stream fallback
+        if "error" in response and token_cb is not None:
+            print(f"[Tenra Agent] Stream hata, non-stream fallback: {response.get('message', response.get('error'))}")
+            if callable(on_stream_reset):
+                try:
+                    on_stream_reset()
+                except Exception:
+                    pass
+            response = backend.chat(
+                messages=messages,
+                tools=tools,
+                model=active_model,
+                temperature=0.3,
+                think=enable_think,
+                on_token=None,
+            )
+
+        # think desteklenmeyen model → think=False ile bir kez daha dene
+        if "error" in response and enable_think:
+            err_txt = str(response.get("message", response.get("error", ""))).lower()
+            if "think" in err_txt:
+                enable_think = False
+                response = backend.chat(
+                    messages=messages,
+                    tools=tools,
+                    model=active_model,
+                    temperature=0.3,
+                    think=False,
+                    on_token=token_cb,
+                )
+
+        last_prompt_eval = response.get("prompt_eval_count")
 
         # Hata kontrolü
         if "error" in response:
@@ -322,30 +464,49 @@ def run_agent_loop(
                 "reply": "",
                 "tool_results": tool_results,
                 "error": error_msg,
+                "model": active_model,
             }
 
         message = response.get("message", {}) or {}
         assistant_text = sanitize_assistant_text(message.get("content", ""))
         extracted_calls = _extract_tool_calls(message)
 
-        print(f"[Tenra Agent] Step {step+1}: calls={len(extracted_calls)}, text_len={len(assistant_text)}")
+        print(
+            f"[Tenra Agent] Step {step+1}: model={active_model}, think={enable_think}, "
+            f"calls={len(extracted_calls)}, text_len={len(assistant_text)}"
+        )
 
         # --- Case 1: Tool calls found ---
         if extracted_calls:
-            # Mesajı geçmişe ekle (model'in cevabı olarak)
+            if callable(on_stream_reset):
+                try:
+                    on_stream_reset()
+                except Exception:
+                    pass
             messages.append(message)
 
+            # Çoklu dosya write/patch → tek diff paketi
+            file_mutators = []
+            other_calls = []
             for tc in extracted_calls:
                 fn_name = tc["name"]
                 fn_args = _normalize_tool_args(fn_name, tc.get("arguments", {}))
+                if fn_name == "file" and fn_args.get("action") in ("write", "patch", "create"):
+                    file_mutators.append((tc, fn_name, fn_args))
+                else:
+                    other_calls.append((tc, fn_name, fn_args))
 
+            use_batch = len(file_mutators) >= 2 and hasattr(executor, "begin_diff_batch")
+            if use_batch:
+                executor.begin_diff_batch()
+
+            def _run_one(tc, fn_name, fn_args):
                 result = executor.execute(fn_name, fn_args)
                 tool_results.append({
                     "name": fn_name,
                     "args": fn_args,
                     "result": result,
                 })
-
                 tool_msg: Dict[str, Any] = {
                     "role": "tool",
                     "name": fn_name,
@@ -354,12 +515,42 @@ def run_agent_loop(
                 if tc.get("id"):
                     tool_msg["tool_call_id"] = tc["id"]
                 messages.append(tool_msg)
+
+            for item in file_mutators:
+                _run_one(*item)
+
+            if use_batch:
+                queued = getattr(executor, "_batch_items", None) or []
+                if queued:
+                    batch_result = executor.flush_diff_batch()
+                    tool_results.append({
+                        "name": "file",
+                        "args": {"action": "batch_commit"},
+                        "result": batch_result,
+                    })
+                    messages.append({
+                        "role": "tool",
+                        "name": "file",
+                        "content": json.dumps(batch_result, ensure_ascii=False),
+                    })
+                elif hasattr(executor, "cancel_diff_batch"):
+                    executor.cancel_diff_batch()
+
+            for item in other_calls:
+                _run_one(*item)
             continue
 
         # --- Case 2: Pure text response (araç gerekmedi) ---
         if assistant_text:
             _record_run_memory(ws_path, user_input, tool_results, assistant_text)
-            return {"ok": True, "reply": assistant_text, "tool_results": tool_results}
+            return {
+                "ok": True,
+                "reply": assistant_text,
+                "tool_results": tool_results,
+                "model": active_model,
+                "uncensored": use_uncensored,
+                "prompt_eval_count": last_prompt_eval,
+            }
 
         # --- Case 3: Boş cevap ama önceki araç sonuçları var ---
         if tool_results:
@@ -371,10 +562,16 @@ def run_agent_loop(
                 "ok": True,
                 "reply": reply,
                 "tool_results": tool_results,
+                "prompt_eval_count": last_prompt_eval,
             }
 
         # --- Case 4: Tamamen boş cevap ---
-        return {"ok": True, "reply": "Hazırım. Size nasıl yardımcı olabilirim?", "tool_results": []}
+        return {
+            "ok": True,
+            "reply": "Hazırım. Size nasıl yardımcı olabilirim?",
+            "tool_results": [],
+            "prompt_eval_count": last_prompt_eval,
+        }
 
     # Döngü tükendi
     if tool_results:

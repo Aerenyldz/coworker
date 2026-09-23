@@ -14,6 +14,12 @@ _archive_v1/
 *.db
 tenra_v5/data/
 
+# PyInstaller / paket çıktıları (yüz binlerce dosya — indekslenmesin)
+build/
+dist/
+installer/
+*.spec
+
 # Local secrets
 .env
 .env.*
@@ -24,6 +30,7 @@ credentials.json
 tenra_v5/merged_model/*.safetensors
 *.gguf
 *.bin
+*.onnx
 
 # Training data (büyük jsonl dosyaları)
 tenra_v5/training_dataset_functions.jsonl

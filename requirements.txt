@@ -9,3 +9,18 @@ pytesseract>=0.3.10
 ddgs>=9.0
 SpeechRecognition>=3.10.0
 PyAudio>=0.2.14
+# Faz 2 — Vektörel RAG & Tree-sitter AST
+sqlite-vec>=0.1.0
+tree-sitter>=0.21.0
+tree-sitter-javascript>=0.21.0
+tree-sitter-typescript>=0.21.0
+tree-sitter-html>=0.20.0
+tree-sitter-css>=0.21.0
+# Faz 3 — Offline STT / TTS
+faster-whisper>=1.0.0
+pyttsx3>=2.90
+# İsteğe bağlı: ASCII Türkçe → ç/ğ/ı (pip install turkish-deasciifier)
+# veya: pip install "git+https://github.com/emres/turkish-deasciifier.git"
+# Faz 4 — paketleme & test (geliştirme)
+pyinstaller>=6.0.0
+pytest>=8.0.0
